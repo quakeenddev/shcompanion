@@ -117,7 +117,7 @@ pnpm typecheck
 ## Current Scope
 
 - Backend API exposes a basic health endpoint.
-- Discord bot supports `/steam64id`, `/lobi-olustur`, color selection buttons, and host match code creation.
+- Discord bot supports `/steam64id`, `/lobi-olustur`, `/lobim`, lobby join/leave, lobby dissolution voting, no-show host tools, missing-player cancellation, and host match code creation.
 - Shared packages define initial enums, event schema helpers, game-rule helpers, and elo placeholders.
 - Prisma schema defines the first persistent models.
 - Admin web and Tabletop Simulator Lua folders are placeholders.
@@ -126,7 +126,19 @@ pnpm typecheck
 
 - `POST /api/v1/users/:discordId/steam` registers or updates a user's Steam64 ID.
 - `POST /api/v1/lobbies` creates an OPEN lobby.
-- `POST /api/v1/lobbies/:lobbyId/participants` joins an OPEN lobby with a selected Tabletop color.
+- `POST /api/v1/lobbies/:lobbyId/participants` joins an OPEN lobby without Discord-side color selection.
+- `POST /api/v1/lobbies/:lobbyId/leave` lets a participant leave an incomplete OPEN lobby.
+- `POST /api/v1/lobbies/:lobbyId/dissolution-vote/start` starts a full-lobby dissolution vote.
+- `POST /api/v1/lobbies/:lobbyId/dissolution-vote/vote` stores a participant dissolution vote.
+- `POST /api/v1/lobbies/:lobbyId/participants/no-show` lets the host mark a player no-show near game time.
+- `POST /api/v1/lobbies/:lobbyId/cancel-missing-players` cancels a lobby for missing participation and creates NO_SHOW records.
 - `POST /api/v1/lobbies/:lobbyId/match` creates a CREATED match code once the lobby is full.
 
 Sprint 1 does not implement MatchEvent ingestion, Tabletop Lua logic, elo, or the admin web panel.
+
+## TODO Notes
+
+- TODO: Add check-in system before game time.
+- TODO: Add backup player system for replacement joins.
+- TODO: Add production build/start scripts for Oracle deployment.
+- TODO: Add moderator recovery commands for stuck lobbies and match flows.

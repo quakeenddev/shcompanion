@@ -1,16 +1,27 @@
 import {
+  ActionRowBuilder,
+  ButtonInteraction,
+  ChatInputCommandInteraction,
   Client,
   GatewayIntentBits,
   MessageFlags,
-  type Interaction
+  ModalBuilder,
+  ModalSubmitInteraction,
+  StringSelectMenuBuilder,
+  StringSelectMenuInteraction,
+  TextInputBuilder,
+  TextInputStyle,
+  type Interaction,
+  type Message
 } from "discord.js";
 import { validateGameModePlayerCount, validateGameVariant } from "@shc/game-rules";
-import { GameMode, GameVariant, PlayerColor } from "@shc/shared-types";
+import { GameMode, GameVariant, LobbyParticipantStatus } from "@shc/shared-types";
 import {
   BackendClient,
   BackendError,
   BackendNetworkError,
-  BackendResponseShapeError
+  BackendResponseShapeError,
+  type LobbyView
 } from "./backend-client.js";
 import { loadDiscordBotEnv } from "./env.js";
 import { renderLobbyComponents, renderLobbyEmbed } from "./lobby-message.js";
@@ -22,53 +33,78 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
+type SendableChannel = {
+  send(options: Parameters<Message["edit"]>[0]): Promise<Message>;
+};
+
+type MessageFetchableChannel = {
+  messages: {
+    fetch(messageId: string): Promise<Message>;
+  };
+};
+
 function parseGameMode(value: string): GameMode {
   return value as GameMode;
-}
-
-function parsePlayerColor(value: string): PlayerColor {
-  return value as PlayerColor;
 }
 
 function parseGameVariant(value: string): GameVariant {
   return value as GameVariant;
 }
 
+function isSendableChannel(value: unknown): value is SendableChannel {
+  return typeof value === "object" && value !== null && "send" in value;
+}
+
+function isMessageFetchableChannel(value: unknown): value is MessageFetchableChannel {
+  return typeof value === "object" && value !== null && "messages" in value;
+}
+
+function isValidScheduleInput(value: string): boolean {
+  return /^\d{2}\.\d{2}\.\d{4}-\d{2}\.\d{2}$/.test(value);
+}
+
 function formatBackendError(error: unknown): string {
   if (error instanceof BackendError) {
-    if (error.message === "STEAM_ID_REQUIRED" || error.message === "COMPETITIVE_STEAM64_REQUIRED") {
-      return "Competitive maclara katilmak icin once /steam64id komutuyla Steam64 ID tanitmalisin.";
-    }
+    const messages: Record<string, string> = {
+      STEAM_ID_REQUIRED: "Competitive maclara katilmak icin once /steam64id komutuyla Steam64 ID tanitmalisin.",
+      COMPETITIVE_STEAM64_REQUIRED: "Competitive maclara katilmak icin once /steam64id komutuyla Steam64 ID tanitmalisin.",
+      LOBBY_FULL: "Lobi dolu.",
+      LOBBY_NOT_FULL: "Fesih oylamasi veya oyun baslatma islemi icin lobi dolu olmali.",
+      USER_ALREADY_JOINED: "Bu lobiye zaten katildin.",
+      LOBBY_NOT_OPEN: "Bu lobi artik katilima acik degil.",
+      SEATS_LOCKED: "Koltuklar kilitlendi.",
+      INVALID_GAME_VARIANT: "Secilen variant bu oyuncu sayisi/mod icin uygun degil.",
+      LOBBY_NOT_FOUND: "Lobi bulunamadi.",
+      NOT_IN_LOBBY: "Bu lobide degilsin.",
+      HOST_CANNOT_LEAVE: "Host lobiden ayrilamaz. Lobiyi kapatmak icin Oyunu Boz butonunu kullan.",
+      LOBBY_LOCKED: "Bu lobi artik kilitlendigi icin cikis yapilamaz.",
+      HOST_ONLY: "Bu islemi sadece host yapabilir.",
+      INVALID_SCHEDULE_FORMAT: "Tarih/saat formati hatali. Dogru format: gun.ay.yil-00.00 orn. 03.06.2026-21.00",
+      CANNOT_CANCEL_WITHIN_ONE_HOUR: "Oyuna 1 saatten az kaldigi icin dolu lobi bozulamaz.",
+      LOBBY_ALREADY_CANCELLED: "Bu lobi zaten bozulmus.",
+      LOBBY_ALREADY_EXPIRED: "Bu lobi zaten suresi doldugu icin kapanmis.",
+      LOBBY_ALREADY_DISSOLVED: "Bu lobi zaten oyuncu oylamasiyla feshedilmis.",
+      LOBBY_ALREADY_IN_PROGRESS: "Bu lobi icin oyun zaten baslatilmis.",
+      LOBBY_ALREADY_STARTED: "Bu lobi icin oyun zaten baslatilmis.",
+      LOBBY_ALREADY_CANCELLED_MISSING_PLAYERS: "Bu lobi eksik katilim nedeniyle zaten kapatilmis.",
+      DISSOLUTION_VOTE_ALREADY_OPEN: "Bu lobi icin zaten acik bir fesih oylamasi var.",
+      NO_OPEN_DISSOLUTION_VOTE: "Bu lobi icin acik fesih oylamasi yok.",
+      GAME_ALREADY_STARTED: "Oyun baslatildigi icin fesih oylamasi acilamaz.",
+      DISSOLUTION_VOTE_OPEN: "Acik fesih oylamasi varken oyun baslatilamaz.",
+      START_TOO_EARLY: "Oyun baslatma kilidi yalnizca oyun saatine 15 dakika kala acilir.",
+      START_TOO_LATE: "Oyun baslatma suresi gecti. Lutfen lobiyi yeniden planlayin veya host/mod destegi alin.",
+      LOBBY_NOT_SCHEDULED: "Oyuncu yok isaretlemesi icin lobi tarihi/saatinin belirlenmis olmasi gerekir.",
+      TOO_EARLY_FOR_NO_SHOW: "Oyuncu yok isaretlemesi oyun saatine 15 dakika kala acilir.",
+      TARGET_NOT_IN_LOBBY: "Secilen oyuncu bu lobide degil.",
+      TOO_EARLY_FOR_MISSING_CANCEL: "Eksik katilim nedeniyle oyunu dagitma secenegi oyun saati geldiginde acilir.",
+      NO_MISSING_PLAYERS_SELECTED: "Lutfen gelmeyen en az bir oyuncu sec.",
+      MATCH_ALREADY_CREATED: "Bu lobi icin match code zaten olusturulmus.",
+      ACTIVE_LOBBY_EXISTS:
+        "Zaten aktif bir lobidesin. Lobini tekrar acmak icin /lobim komutunu kullanabilir, oradan cikabilir veya host isen oyunu bozabilirsin.",
+      NO_ACTIVE_LOBBY: "Aktif bir lobin yok."
+    };
 
-    if (error.message === "LOBBY_FULL") {
-      return "Lobi dolu.";
-    }
-
-    if (error.message === "COLOR_TAKEN") {
-      return "Bu renk zaten secilmis.";
-    }
-
-    if (error.message === "USER_ALREADY_JOINED") {
-      return "Bu lobiye zaten katildin.";
-    }
-
-    if (error.message === "LOBBY_NOT_OPEN") {
-      return "Bu lobi artik katilima acik degil.";
-    }
-
-    if (error.message === "SEATS_LOCKED") {
-      return "Koltuklar kilitlendi. Oyun saatine 1 saatten az kaldigi icin renk secimi degistirilemez.";
-    }
-
-    if (error.message === "INVALID_GAME_VARIANT") {
-      return "Secilen variant bu oyuncu sayisi/mod icin uygun degil.";
-    }
-
-    if (error.message === "LOBBY_NOT_FOUND") {
-      return "Lobi bulunamadi.";
-    }
-
-    return error.message;
+    return messages[error.message] ?? error.message;
   }
 
   if (error instanceof BackendNetworkError) {
@@ -102,161 +138,251 @@ function logMissingOption(commandName: string, optionName: string): void {
   );
 }
 
-async function handleInteraction(interaction: Interaction): Promise<void> {
-  if (interaction.isChatInputCommand()) {
-    if (interaction.commandName === "steam64id") {
-      await interaction.deferReply({
-        flags: MessageFlags.Ephemeral
+async function saveLobbyMessage(lobby: LobbyView, message: Message): Promise<void> {
+  await backend.updateLobbyDiscordMessage({
+    lobbyId: lobby.id,
+    discordChannelId: message.channelId,
+    discordMessageId: message.id
+  });
+}
+
+async function sendLobbyMessage(channel: unknown, lobby: LobbyView, matchCode?: string): Promise<Message> {
+  if (!isSendableChannel(channel)) {
+    throw new Error("Current channel cannot send lobby messages.");
+  }
+
+  return channel.send({
+    embeds: [renderLobbyEmbed(lobby, matchCode)],
+    components: renderLobbyComponents(lobby)
+  });
+}
+
+async function refreshLobbyMessage(message: Message, lobbyId: string, matchCode?: string): Promise<LobbyView> {
+  const lobby = await backend.getLobby(lobbyId);
+
+  await message.edit({
+    embeds: [renderLobbyEmbed(lobby, matchCode)],
+    components: renderLobbyComponents(lobby)
+  });
+
+  return lobby;
+}
+
+function getJoinedParticipantOptions(lobby: LobbyView) {
+  return lobby.participants
+    .filter((participant) => participant.status === LobbyParticipantStatus.Joined)
+    .slice(0, 25)
+    .map((participant, index) => ({
+      label: (participant.username ?? `Oyuncu ${index + 1}`).slice(0, 100),
+      description: participant.discordId,
+      value: participant.discordId
+    }));
+}
+
+async function updateStoredLobbyMessage(lobby: LobbyView): Promise<void> {
+  const channel = await client.channels.fetch(lobby.discordChannelId).catch(() => null);
+
+  if (!isMessageFetchableChannel(channel)) {
+    return;
+  }
+
+  const message = lobby.discordMessageId
+    ? await channel.messages.fetch(lobby.discordMessageId).catch(() => null)
+    : null;
+
+  if (!message) {
+    if (isSendableChannel(channel)) {
+      const recreatedMessage = await sendLobbyMessage(channel, lobby);
+      await saveLobbyMessage(lobby, recreatedMessage);
+    }
+    return;
+  }
+
+  await message.edit({
+    embeds: [renderLobbyEmbed(lobby)],
+    components: renderLobbyComponents(lobby)
+  });
+}
+
+async function handleChatCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (interaction.commandName === "steam64id") {
+    await interaction.deferReply({
+      flags: MessageFlags.Ephemeral
+    });
+
+    const steam64Id = interaction.options.getString("steam64id", false);
+
+    if (!steam64Id) {
+      logMissingOption("steam64id", "steam64id");
+      await interaction.editReply({
+        content: "Steam64 ID secenegi eksik gorunuyor. Lutfen slash komutlarini yeniden kaydedin."
       });
-
-      const steam64Id = interaction.options.getString("steam64id", false);
-
-      if (!steam64Id) {
-        logMissingOption("steam64id", "steam64id");
-        await interaction.editReply({
-          content: "Steam64 ID secenegi eksik gorunuyor. Lutfen slash komutlarini yeniden kaydedin."
-        });
-        return;
-      }
-
-      try {
-        await backend.registerSteam64Id({
-          discordId: interaction.user.id,
-          steam64Id,
-          username: interaction.user.username
-        });
-
-        await interaction.editReply({
-          content: "Steam64 ID kaydedildi."
-        });
-      } catch (error) {
-        await interaction.editReply({
-          content: formatBackendError(error)
-        });
-      }
-
       return;
     }
 
-    if (interaction.commandName === "lobi-olustur") {
-      if (!interaction.guildId) {
-        await interaction.reply({
-          content: "Bu komut sadece sunucu icinde kullanilabilir.",
-          flags: MessageFlags.Ephemeral
-        });
-        return;
-      }
+    try {
+      await backend.registerSteam64Id({
+        discordId: interaction.user.id,
+        steam64Id,
+        username: interaction.user.username
+      });
 
-      const modeInput = interaction.options.getString("mode", false);
-      const playerCount = interaction.options.getInteger("player_count", false);
-      const variantInput = interaction.options.getString("variant", false);
-      const scheduledAt = interaction.options.getString("scheduled_at", false);
-
-      if (!modeInput) {
-        logMissingOption("lobi-olustur", "mode");
-        await interaction.reply({
-          content: "Lobi modu secenegi eksik gorunuyor. Lutfen slash komutlarini yeniden kaydedin.",
-          flags: MessageFlags.Ephemeral
-        });
-        return;
-      }
-
-      if (!playerCount) {
-        logMissingOption("lobi-olustur", "player_count");
-        await interaction.reply({
-          content: "Oyuncu sayisi secenegi eksik gorunuyor. Lutfen slash komutlarini yeniden kaydedin.",
-          flags: MessageFlags.Ephemeral
-        });
-        return;
-      }
-
-      if (!scheduledAt) {
-        logMissingOption("lobi-olustur", "scheduled_at");
-        await interaction.reply({
-          content: "Oyun tarih/saat secenegi eksik gorunuyor. Lutfen slash komutlarini yeniden kaydedin.",
-          flags: MessageFlags.Ephemeral
-        });
-        return;
-      }
-
-      const mode = parseGameMode(modeInput);
-      const variant = variantInput ? parseGameVariant(variantInput) : undefined;
-
-      if (!validateGameModePlayerCount(mode, playerCount)) {
-        await interaction.reply({
-          content: "Secilen mod ve oyuncu sayisi uyumlu degil.",
-          flags: MessageFlags.Ephemeral
-        });
-        return;
-      }
-
-      if (variant && !validateGameVariant(mode, playerCount, variant)) {
-        await interaction.reply({
-          content: "Secilen variant sadece uygun 7 kisilik oyunlarda kullanilabilir.",
-          flags: MessageFlags.Ephemeral
-        });
-        return;
-      }
-
-      await interaction.deferReply();
-
-      try {
-        const lobby = await backend.createLobby({
-          guildId: interaction.guildId,
-          channelId: interaction.channelId,
-          createdByDiscordId: interaction.user.id,
-          mode,
-          playerCount,
-          variant,
-          scheduledAt
-        });
-
-        await interaction.editReply({
-          embeds: [renderLobbyEmbed(lobby)],
-          components: renderLobbyComponents(lobby, true)
-        });
-      } catch (error) {
-        logInteractionError("Lobby creation failed", {
-          commandName: interaction.commandName,
-          userId: interaction.user.id,
-          mode,
-          playerCount,
-          variant,
-          scheduledAt
-        }, error);
-        await interaction.editReply({
-          content: formatBackendError(error),
-          embeds: [],
-          components: []
-        });
-      }
+      await interaction.editReply({
+        content: "Steam64 ID kaydedildi."
+      });
+    } catch (error) {
+      await interaction.editReply({
+        content: formatBackendError(error)
+      });
     }
 
     return;
   }
 
-  if (!interaction.isButton()) {
+  if (interaction.commandName === "lobim") {
+    await interaction.deferReply({
+      flags: MessageFlags.Ephemeral
+    });
+
+    try {
+      const lobby = await backend.getActiveLobby(interaction.user.id);
+      const message = await sendLobbyMessage(interaction.channel, lobby);
+      await saveLobbyMessage(lobby, message);
+
+      await interaction.editReply({
+        content: "Aktif lobin yeniden acildi."
+      });
+    } catch (error) {
+      await interaction.editReply({
+        content: formatBackendError(error)
+      });
+    }
+
     return;
   }
 
+  if (interaction.commandName !== "lobi-olustur") {
+    return;
+  }
+
+  if (!interaction.guildId) {
+    await interaction.reply({
+      content: "Bu komut sadece sunucu icinde kullanilabilir.",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  const modeInput = interaction.options.getString("mode", false);
+  const playerCount = interaction.options.getInteger("player_count", false);
+  const scheduledAt = interaction.options.getString("scheduled_at", false) ?? undefined;
+  const variantInput = interaction.options.getString("variant", false);
+
+  if (!modeInput) {
+    logMissingOption("lobi-olustur", "mode");
+    await interaction.reply({
+      content: "Lobi modu secenegi eksik gorunuyor. Lutfen slash komutlarini yeniden kaydedin.",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  if (!playerCount) {
+    logMissingOption("lobi-olustur", "player_count");
+    await interaction.reply({
+      content: "Oyuncu sayisi secenegi eksik gorunuyor. Lutfen slash komutlarini yeniden kaydedin.",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  if (scheduledAt && !isValidScheduleInput(scheduledAt)) {
+    await interaction.reply({
+      content: "Tarih/saat formati hatali. Dogru format: gun.ay.yil-00.00 orn. 03.06.2026-21.00",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  const mode = parseGameMode(modeInput);
+  const variant = variantInput ? parseGameVariant(variantInput) : undefined;
+
+  if (!validateGameModePlayerCount(mode, playerCount)) {
+    await interaction.reply({
+      content: "Secilen mod ve oyuncu sayisi uyumlu degil.",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  if (variant && !validateGameVariant(mode, playerCount, variant)) {
+    await interaction.reply({
+      content: "Secilen variant sadece uygun 7 kisilik oyunlarda kullanilabilir.",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  await interaction.deferReply();
+
+  try {
+    const lobby = await backend.createLobby({
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      createdByDiscordId: interaction.user.id,
+      mode,
+      playerCount,
+      variant,
+      scheduledAt
+    });
+
+    await interaction.editReply({
+      embeds: [renderLobbyEmbed(lobby)],
+      components: renderLobbyComponents(lobby)
+    });
+
+    const message = await interaction.fetchReply();
+    await saveLobbyMessage(lobby, message);
+  } catch (error) {
+    logInteractionError("Lobby creation failed", {
+      commandName: interaction.commandName,
+      userId: interaction.user.id,
+      mode,
+      playerCount,
+      variant,
+      scheduledAt
+    }, error);
+    await interaction.editReply({
+      content: formatBackendError(error),
+      embeds: [],
+      components: []
+    });
+  }
+}
+
+async function handleButton(interaction: ButtonInteraction): Promise<void> {
   const [action, lobbyId, value] = interaction.customId.split(":");
 
   if (action === "lobby-join") {
     await interaction.deferUpdate();
-    const selectedColor = parsePlayerColor(value);
 
     try {
       await backend.joinLobby({
         lobbyId,
         discordId: interaction.user.id,
-        username: interaction.user.username,
-        selectedColor
+        username: interaction.user.username
+      });
+
+      await refreshLobbyMessage(interaction.message, lobbyId);
+
+      await interaction.followUp({
+        content: "Lobiye katildin.",
+        flags: MessageFlags.Ephemeral
       });
     } catch (error) {
-      logInteractionError("Lobby color selection backend request failed", {
+      logInteractionError("Lobby join failed", {
         customId: interaction.customId,
         lobbyId,
-        selectedColor,
         userId: interaction.user.id
       }, error);
 
@@ -264,32 +390,283 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
         content: formatBackendError(error),
         flags: MessageFlags.Ephemeral
       });
+    }
+
+    return;
+  }
+
+  if (action === "lobby-leave") {
+    await interaction.deferUpdate();
+
+    try {
+      await backend.leaveLobby({
+        lobbyId,
+        requestedByDiscordId: interaction.user.id
+      });
+
+      await refreshLobbyMessage(interaction.message, lobbyId);
+
+      await interaction.followUp({
+        content: "Lobiden ayrildin.",
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (error) {
+      await interaction.followUp({
+        content: formatBackendError(error),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    return;
+  }
+
+  if (action === "lobby-edit-schedule") {
+    const hostDiscordId = value;
+
+    if (interaction.user.id !== hostDiscordId) {
+      await interaction.reply({
+        content: "Bu islemi sadece host yapabilir.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`lobby-schedule-modal:${lobbyId}:${hostDiscordId}`)
+      .setTitle("Tarih/Saat Degistir")
+      .addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
+          new TextInputBuilder()
+            .setCustomId("scheduled_at")
+            .setLabel("Yeni tarih/saat")
+            .setPlaceholder("03.06.2026-21.00")
+            .setRequired(true)
+            .setStyle(TextInputStyle.Short)
+        )
+      );
+
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (action === "lobby-cancel") {
+    const hostDiscordId = value;
+
+    if (interaction.user.id !== hostDiscordId) {
+      await interaction.reply({
+        content: "Bu islemi sadece host yapabilir.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    await interaction.deferUpdate();
+
+    try {
+      await backend.cancelLobby({
+        lobbyId,
+        requestedByDiscordId: interaction.user.id
+      });
+
+      await refreshLobbyMessage(interaction.message, lobbyId);
+
+      await interaction.followUp({
+        content: "Lobi bozuldu.",
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (error) {
+      await interaction.followUp({
+        content: formatBackendError(error),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    return;
+  }
+
+  if (action === "lobby-dissolution-start") {
+    await interaction.deferUpdate();
+
+    try {
+      const lobby = await backend.startDissolutionVote({
+        lobbyId,
+        requestedByDiscordId: interaction.user.id
+      });
+
+      await interaction.message.edit({
+        embeds: [renderLobbyEmbed(lobby)],
+        components: renderLobbyComponents(lobby)
+      });
+
+      await interaction.followUp({
+        content: "Fesih oylamasi baslatildi.",
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (error) {
+      await interaction.followUp({
+        content: formatBackendError(error),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    return;
+  }
+
+  if (action === "lobby-dissolution-vote") {
+    await interaction.deferUpdate();
+    const vote = value === "YES" ? "YES" : "NO";
+
+    try {
+      const lobby = await backend.castDissolutionVote({
+        lobbyId,
+        requestedByDiscordId: interaction.user.id,
+        vote
+      });
+
+      await interaction.message.edit({
+        embeds: [renderLobbyEmbed(lobby)],
+        components: renderLobbyComponents(lobby)
+      });
+
+      await interaction.followUp({
+        content: `Fesih oyunuz kaydedildi: ${vote === "YES" ? "Evet" : "Hayir"}`,
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (error) {
+      await interaction.followUp({
+        content: formatBackendError(error),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    return;
+  }
+
+  if (action === "lobby-start-game") {
+    const hostDiscordId = value;
+
+    if (interaction.user.id !== hostDiscordId) {
+      await interaction.reply({
+        content: "Bu islemi sadece host yapabilir.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    await interaction.deferUpdate();
+
+    try {
+      const lobby = await backend.startGame({
+        lobbyId,
+        requestedByDiscordId: interaction.user.id
+      });
+
+      await interaction.message.edit({
+        embeds: [renderLobbyEmbed(lobby)],
+        components: renderLobbyComponents(lobby)
+      });
+
+      await interaction.followUp({
+        content: "Oyun basliyor. Lobi kilitlendi.",
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (error) {
+      await interaction.followUp({
+        content: formatBackendError(error),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    return;
+  }
+
+  if (action === "lobby-no-show-menu") {
+    const hostDiscordId = value;
+
+    if (interaction.user.id !== hostDiscordId) {
+      await interaction.reply({
+        content: "Bu islemi sadece host yapabilir.",
+        flags: MessageFlags.Ephemeral
+      });
       return;
     }
 
     try {
       const lobby = await backend.getLobby(lobbyId);
+      const options = getJoinedParticipantOptions(lobby);
 
-      await interaction.message.edit({
-        embeds: [renderLobbyEmbed(lobby)],
-        components: renderLobbyComponents(lobby, interaction.user.id === lobby.createdByDiscordId)
-      });
+      if (options.length === 0) {
+        await interaction.reply({
+          content: "Isaretlenecek aktif oyuncu yok.",
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
 
-      await interaction.followUp({
-        content: "Renk secimin kaydedildi.",
+      await interaction.reply({
+        content: "Oyuncu yok olarak isaretlenecek kisiyi sec.",
+        components: [
+          new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(`lobby-no-show-select:${lobbyId}:${hostDiscordId}`)
+              .setPlaceholder("Oyuncu sec")
+              .setMinValues(1)
+              .setMaxValues(1)
+              .addOptions(options)
+          )
+        ],
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
-      logInteractionError("Lobby color selection post-save update failed", {
-        customId: interaction.customId,
-        lobbyId,
-        selectedColor,
-        userId: interaction.user.id
-      }, error);
+      await interaction.reply({
+        content: formatBackendError(error),
+        flags: MessageFlags.Ephemeral
+      });
+    }
 
-      await interaction.followUp({
-        content:
-          "Renk kaydedildi ama lobi mesaji guncellenirken hata olustu. Lutfen tekrar deneyin veya hosttan mesaji yenilemesini isteyin.",
+    return;
+  }
+
+  if (action === "lobby-cancel-missing-menu") {
+    const hostDiscordId = value;
+
+    if (interaction.user.id !== hostDiscordId) {
+      await interaction.reply({
+        content: "Bu islemi sadece host yapabilir.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    try {
+      const lobby = await backend.getLobby(lobbyId);
+      const options = getJoinedParticipantOptions(lobby);
+
+      if (options.length === 0) {
+        await interaction.reply({
+          content: "Lutfen gelmeyen en az bir oyuncu sec.",
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: "Bu islem lobiyi kapatacak ve secilen oyunculari no-show olarak raporlayacak.",
+        components: [
+          new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(`lobby-cancel-missing-select:${lobbyId}:${hostDiscordId}`)
+              .setPlaceholder("Gelmeyen oyunculari sec")
+              .setMinValues(1)
+              .setMaxValues(options.length)
+              .addOptions(options)
+          )
+        ],
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (error) {
+      await interaction.reply({
+        content: formatBackendError(error),
         flags: MessageFlags.Ephemeral
       });
     }
@@ -302,7 +679,7 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
 
     if (interaction.user.id !== hostDiscordId) {
       await interaction.reply({
-        content: "Sadece lobi sahibi match code olusturabilir.",
+        content: "Bu islemi sadece host yapabilir.",
         flags: MessageFlags.Ephemeral
       });
       return;
@@ -312,12 +689,12 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
 
     try {
       const matchCode = await backend.createMatch(lobbyId);
-      const freshLobby = await backend.getLobby(lobbyId);
+      const freshLobby = await refreshLobbyMessage(interaction.message, lobbyId, matchCode);
 
       await interaction.message.edit({
         content: `Match Code: ${matchCode}. Bu kodu ileride Tabletop Match Control Panel'e girecegiz.`,
         embeds: [renderLobbyEmbed(freshLobby, matchCode)],
-        components: renderLobbyComponents(freshLobby, true)
+        components: renderLobbyComponents(freshLobby)
       });
     } catch (error) {
       logInteractionError("Match creation failed", {
@@ -333,8 +710,158 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
   }
 }
 
+async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
+  const [action, lobbyId, hostDiscordId] = interaction.customId.split(":");
+
+  if (action !== "lobby-schedule-modal") {
+    return;
+  }
+
+  if (interaction.user.id !== hostDiscordId) {
+    await interaction.reply({
+      content: "Bu islemi sadece host yapabilir.",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  const scheduledAtInput = interaction.fields.getTextInputValue("scheduled_at");
+
+  if (!isValidScheduleInput(scheduledAtInput)) {
+    await interaction.reply({
+      content: "Tarih/saat formati hatali. Dogru format: gun.ay.yil-00.00 orn. 03.06.2026-21.00",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  await interaction.deferReply({
+    flags: MessageFlags.Ephemeral
+  });
+
+  try {
+    const lobby = await backend.updateLobbySchedule({
+      lobbyId,
+      requestedByDiscordId: interaction.user.id,
+      scheduledAtInput
+    });
+
+    await updateStoredLobbyMessage(lobby);
+
+    await interaction.editReply({
+      content: "Tarih/saat guncellendi."
+    });
+  } catch (error) {
+    await interaction.editReply({
+      content: formatBackendError(error)
+    });
+  }
+}
+
+async function handleSelectMenu(interaction: StringSelectMenuInteraction): Promise<void> {
+  const [action, lobbyId, hostDiscordId] = interaction.customId.split(":");
+
+  if (interaction.user.id !== hostDiscordId) {
+    await interaction.reply({
+      content: "Bu islemi sadece host yapabilir.",
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  if (action === "lobby-no-show-select") {
+    try {
+      const lobby = await backend.markNoShow({
+        lobbyId,
+        requestedByDiscordId: interaction.user.id,
+        targetDiscordId: interaction.values[0]
+      });
+
+      await updateStoredLobbyMessage(lobby);
+      await interaction.editReply({
+        content: "Oyuncu yok olarak isaretlendi.",
+        components: []
+      });
+    } catch (error) {
+      await interaction.editReply({
+        content: formatBackendError(error),
+        components: []
+      });
+    }
+
+    return;
+  }
+
+  if (action === "lobby-cancel-missing-select") {
+    try {
+      const lobby = await backend.cancelMissingPlayers({
+        lobbyId,
+        requestedByDiscordId: interaction.user.id,
+        missingDiscordIds: interaction.values
+      });
+
+      await updateStoredLobbyMessage(lobby);
+      await interaction.editReply({
+        content: "Eksik katilim nedeniyle oyun dagildi. Gelmeyen oyuncular raporlandi.",
+        components: []
+      });
+    } catch (error) {
+      await interaction.editReply({
+        content: formatBackendError(error),
+        components: []
+      });
+    }
+  }
+}
+
+async function handleInteraction(interaction: Interaction): Promise<void> {
+  if (interaction.isChatInputCommand()) {
+    await handleChatCommand(interaction);
+    return;
+  }
+
+  if (interaction.isButton()) {
+    await handleButton(interaction);
+    return;
+  }
+
+  if (interaction.isModalSubmit()) {
+    await handleModal(interaction);
+    return;
+  }
+
+  if (interaction.isStringSelectMenu()) {
+    await handleSelectMenu(interaction);
+  }
+}
+
+async function runLobbyCleanup(): Promise<void> {
+  try {
+    const expired = await backend.expireStaleLobbies();
+
+    for (const lobby of expired) {
+      const channel = await client.channels.fetch(lobby.discordChannelId).catch(() => null);
+
+      await updateStoredLobbyMessage(lobby);
+
+      if (isSendableChannel(channel)) {
+        await channel.send({
+          content: "Planlanan oyun yeterli oyuncuya ulasmadigi icin dolmadi ve kapatildi."
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Lobby cleanup failed:", error);
+  }
+}
+
 client.once("clientReady", (readyClient) => {
   console.log(`Discord bot ready as ${readyClient.user.tag}`);
+  setInterval(() => {
+    void runLobbyCleanup();
+  }, 5 * 60 * 1000);
 });
 
 client.on("error", (error) => {

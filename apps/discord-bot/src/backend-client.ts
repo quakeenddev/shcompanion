@@ -1,10 +1,10 @@
-import { GameMode, GameVariant, LobbyStatus, PlayerColor } from "@shc/shared-types";
+import { GameMode, GameVariant, LobbyParticipantStatus, LobbyStatus } from "@shc/shared-types";
 
 export type LobbyParticipantView = {
   discordId: string;
   username?: string | null;
-  selectedColor: PlayerColor;
-  status?: string;
+  status: LobbyParticipantStatus;
+  joinedAt: string;
 };
 
 export type LobbyView = {
@@ -12,12 +12,15 @@ export type LobbyView = {
   code: string;
   guildId: string;
   channelId: string;
+  discordGuildId: string;
+  discordChannelId: string;
+  discordMessageId?: string | null;
   mode: GameMode;
   variant: GameVariant;
   playerCount: number;
   status: LobbyStatus;
-  scheduledAt: string;
-  seatsLockedAt: string;
+  scheduledAt: string | null;
+  seatsLockedAt: string | null;
   createdByDiscordId: string;
   host: {
     discordId: string;
@@ -25,10 +28,27 @@ export type LobbyView = {
   };
   joinedPlayersCount: number;
   participants: LobbyParticipantView[];
+  noShowParticipants: Array<{
+    discordId: string;
+    username?: string | null;
+    status: LobbyParticipantStatus;
+  }>;
   match: {
     id: string;
     matchCode: string;
     status: string;
+  } | null;
+  dissolutionVote: {
+    id: string;
+    status: string;
+    yesCount: number;
+    noCount: number;
+    threshold: number;
+    startedByDiscordId: string;
+    votes: Array<{
+      discordId: string;
+      vote: "YES" | "NO";
+    }>;
   } | null;
 };
 
@@ -38,7 +58,12 @@ type SuccessResponse<T> = {
 
 type ErrorResponse = {
   success: false;
-  error: string;
+  error:
+    | string
+    | {
+        code: string;
+        message: string;
+      };
 };
 
 export class BackendError extends Error {
@@ -99,12 +124,42 @@ export class BackendClient {
     mode: GameMode;
     playerCount: number;
     variant?: GameVariant;
-    scheduledAt: string;
+    scheduledAt?: string;
   }): Promise<LobbyView> {
     const response = await this.request<SuccessResponse<{ lobby: unknown }>>("/lobbies", {
       method: "POST",
       body: input
     });
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async getActiveLobby(discordId: string): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/users/${discordId}/active-lobby`,
+      {
+        method: "GET"
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async updateLobbyDiscordMessage(input: {
+    lobbyId: string;
+    discordChannelId: string;
+    discordMessageId: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/discord-message`,
+      {
+        method: "PATCH",
+        body: {
+          discordChannelId: input.discordChannelId,
+          discordMessageId: input.discordMessageId
+        }
+      }
+    );
 
     return assertLobbyView(response.lobby);
   }
@@ -124,7 +179,6 @@ export class BackendClient {
     lobbyId: string;
     discordId: string;
     username?: string;
-    selectedColor: PlayerColor;
   }): Promise<void> {
     await this.request<SuccessResponse<Record<string, unknown>>>(
       `/lobbies/${input.lobbyId}/participants`,
@@ -132,11 +186,165 @@ export class BackendClient {
         method: "POST",
         body: {
           discordId: input.discordId,
-          username: input.username,
-          selectedColor: input.selectedColor
+          username: input.username
         }
       }
     );
+  }
+
+  async leaveLobby(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/leave`,
+      {
+        method: "POST",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async updateLobbySchedule(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+    scheduledAtInput: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/schedule`,
+      {
+        method: "PATCH",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId,
+          scheduledAtInput: input.scheduledAtInput
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async cancelLobby(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/cancel`,
+      {
+        method: "POST",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async startDissolutionVote(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/dissolution-vote/start`,
+      {
+        method: "POST",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async castDissolutionVote(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+    vote: "YES" | "NO";
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/dissolution-vote/vote`,
+      {
+        method: "POST",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId,
+          vote: input.vote
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async startGame(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/start-game`,
+      {
+        method: "POST",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async markNoShow(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+    targetDiscordId: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/participants/no-show`,
+      {
+        method: "POST",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId,
+          targetDiscordId: input.targetDiscordId
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async cancelMissingPlayers(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+    missingDiscordIds: string[];
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/cancel-missing-players`,
+      {
+        method: "POST",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId,
+          missingDiscordIds: input.missingDiscordIds
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async expireStaleLobbies(): Promise<LobbyView[]> {
+    const response = await this.request<SuccessResponse<{ expired: unknown[] }>>(
+      "/lobbies/expire-stale",
+      {
+        method: "POST"
+      }
+    );
+
+    return response.expired.map(assertLobbyView);
   }
 
   async createMatch(lobbyId: string): Promise<string> {
@@ -153,7 +361,7 @@ export class BackendClient {
   private async request<T>(
     path: string,
     options: {
-      method: "GET" | "POST";
+      method: "GET" | "POST" | "PATCH";
       body?: unknown;
     }
   ): Promise<T> {
@@ -188,7 +396,11 @@ export class BackendClient {
         responseBody: data
       });
 
-      const message = isErrorResponse(data) ? data.error : "Backend request failed.";
+      const message = isErrorResponse(data)
+        ? typeof data.error === "string"
+          ? data.error
+          : data.error.code
+        : "Backend request failed.";
       throw new BackendError(message, response.status, data);
     }
 
@@ -218,7 +430,13 @@ function isErrorResponse(value: unknown): value is ErrorResponse {
     "success" in value &&
     value.success === false &&
     "error" in value &&
-    typeof value.error === "string"
+    (typeof value.error === "string" ||
+      (typeof value.error === "object" &&
+        value.error !== null &&
+        "code" in value.error &&
+        typeof value.error.code === "string" &&
+        "message" in value.error &&
+        typeof value.error.message === "string"))
   );
 }
 
@@ -242,19 +460,24 @@ function isLobbyView(value: unknown): value is LobbyView {
     typeof lobby.code === "string" &&
     typeof lobby.guildId === "string" &&
     typeof lobby.channelId === "string" &&
+    typeof lobby.discordGuildId === "string" &&
+    typeof lobby.discordChannelId === "string" &&
     Object.values(GameMode).includes(lobby.mode as GameMode) &&
     Object.values(GameVariant).includes(lobby.variant as GameVariant) &&
     typeof lobby.playerCount === "number" &&
     Object.values(LobbyStatus).includes(lobby.status as LobbyStatus) &&
-    typeof lobby.scheduledAt === "string" &&
-    typeof lobby.seatsLockedAt === "string" &&
+    (typeof lobby.scheduledAt === "string" || lobby.scheduledAt === null) &&
+    (typeof lobby.seatsLockedAt === "string" || lobby.seatsLockedAt === null) &&
     typeof lobby.createdByDiscordId === "string" &&
     typeof lobby.host === "object" &&
     lobby.host !== null &&
     typeof lobby.host.discordId === "string" &&
     typeof lobby.joinedPlayersCount === "number" &&
     Array.isArray(lobby.participants) &&
-    lobby.participants.every(isLobbyParticipantView)
+    lobby.participants.every(isLobbyParticipantView) &&
+    Array.isArray(lobby.noShowParticipants) &&
+    lobby.noShowParticipants.every(isLobbyNoShowParticipantView) &&
+    isLobbyDissolutionVoteView(lobby.dissolutionVote)
   );
 }
 
@@ -267,6 +490,47 @@ function isLobbyParticipantView(value: unknown): value is LobbyParticipantView {
 
   return (
     typeof participant.discordId === "string" &&
-    Object.values(PlayerColor).includes(participant.selectedColor as PlayerColor)
+    Object.values(LobbyParticipantStatus).includes(participant.status as LobbyParticipantStatus) &&
+    typeof participant.joinedAt === "string"
+  );
+}
+
+function isLobbyNoShowParticipantView(value: unknown): value is LobbyView["noShowParticipants"][number] {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const participant = value as Partial<LobbyView["noShowParticipants"][number]>;
+
+  return (
+    typeof participant.discordId === "string" &&
+    Object.values(LobbyParticipantStatus).includes(participant.status as LobbyParticipantStatus)
+  );
+}
+
+function isLobbyDissolutionVoteView(value: unknown): value is LobbyView["dissolutionVote"] {
+  if (value === null) {
+    return true;
+  }
+
+  if (typeof value !== "object") {
+    return false;
+  }
+
+  const vote = value as Partial<NonNullable<LobbyView["dissolutionVote"]>>;
+
+  return (
+    typeof vote.id === "string" &&
+    typeof vote.status === "string" &&
+    typeof vote.yesCount === "number" &&
+    typeof vote.noCount === "number" &&
+    typeof vote.threshold === "number" &&
+    typeof vote.startedByDiscordId === "string" &&
+    Array.isArray(vote.votes) &&
+    vote.votes.every(
+      (record) =>
+        typeof record.discordId === "string" &&
+        (record.vote === "YES" || record.vote === "NO")
+    )
   );
 }

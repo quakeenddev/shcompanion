@@ -37,21 +37,24 @@ export const developmentCommands = [
     )
     .addStringOption((option) =>
       option
+        .setName("scheduled_at")
+        .setDescription("Game date/time, e.g. 03.06.2026-21.00.")
+        .setRequired(false)
+    )
+    .addStringOption((option) =>
+      option
         .setName("variant")
         .setDescription("7-player variant.")
-        .setRequired(true)
+        .setRequired(false)
         .addChoices(
           { name: "Standard", value: "STANDARD" },
           { name: "Standard Meta", value: "STANDARD_META" },
           { name: "Freeplay", value: "FREEPLAY" }
         )
-    )
-    .addStringOption((option) =>
-      option
-        .setName("scheduled_at")
-        .setDescription("Game date/time, e.g. 2026-06-03 21:00.")
-        .setRequired(true)
-    )
+    ),
+  new SlashCommandBuilder()
+    .setName("lobim")
+    .setDescription("Reopen your active lobby controls.")
 ];
 
 export const developmentCommandPayloads = developmentCommands.map((command) =>

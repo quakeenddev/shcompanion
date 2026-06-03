@@ -27,7 +27,34 @@ export enum PlayerColor {
 export enum LobbyStatus {
   Open = "OPEN",
   Ready = "READY",
-  Closed = "CLOSED"
+  GameStarting = "GAME_STARTING",
+  InProgress = "IN_PROGRESS",
+  Cancelled = "CANCELLED",
+  Expired = "EXPIRED",
+  Dissolved = "DISSOLVED",
+  CancelledMissingPlayers = "CANCELLED_MISSING_PLAYERS",
+  Ended = "ENDED",
+  Voided = "VOIDED"
+}
+
+export enum LobbyParticipantStatus {
+  Joined = "JOINED",
+  Left = "LEFT",
+  NoShow = "NO_SHOW",
+  RemovedNoShow = "REMOVED_NO_SHOW",
+  RemovedByHost = "REMOVED_BY_HOST"
+}
+
+export enum LobbyDissolutionVoteStatus {
+  Open = "OPEN",
+  Passed = "PASSED",
+  Failed = "FAILED",
+  Cancelled = "CANCELLED"
+}
+
+export enum LobbyDissolutionVoteChoice {
+  Yes = "YES",
+  No = "NO"
 }
 
 export enum MatchStatus {
@@ -114,6 +141,19 @@ export enum TrustWeight {
   Medium = "MEDIUM",
   High = "HIGH",
   VeryHigh = "VERY_HIGH"
+}
+
+export enum ReportCategory {
+  Late = "LATE",
+  NoShow = "NO_SHOW",
+  RageQuit = "RAGE_QUIT",
+  RoleReveal = "ROLE_REVEAL",
+  ToxicBehavior = "TOXIC_BEHAVIOR",
+  GamethrowSuspicion = "GAMETHROW_SUSPICION",
+  RuleAbuse = "RULE_ABUSE",
+  HostAbuse = "HOST_ABUSE",
+  IncorrectLogEntry = "INCORRECT_LOG_ENTRY",
+  CollusionSuspicion = "COLLUSION_SUSPICION"
 }
 
 export type Steam64Id = string;
