@@ -71,6 +71,20 @@ type RequestedByBody = {
   requestedByDiscordId?: unknown;
 };
 
+type ModeratorBody = RequestedByBody & {
+  reason?: unknown;
+};
+
+type UpdateLobbyMessageBody = RequestedByBody & {
+  discordChannelId?: unknown;
+  discordMessageId?: unknown;
+  moderator?: unknown;
+};
+
+type RemoveParticipantBody = ModeratorBody & {
+  targetDiscordId?: unknown;
+};
+
 type UpdateScheduleBody = RequestedByBody & {
   scheduledAtInput?: unknown;
 };
@@ -325,6 +339,29 @@ function scheduleFormatMessage(): string {
   return "Tarih/saat formati hatali. Dogru format: gun.ay.yil-00.00 orn. 03.06.2026-21.00";
 }
 
+function parseLobbyStatusFilter(value: unknown): string[] | null {
+  const activeStatuses = ["OPEN", "READY", "GAME_STARTING", "IN_PROGRESS"];
+  const allStatuses = [
+    ...activeStatuses,
+    "CANCELLED",
+    "EXPIRED",
+    "DISSOLVED",
+    "CANCELLED_MISSING_PLAYERS",
+    "ENDED",
+    "VOIDED"
+  ];
+
+  if (value === undefined || value === "ACTIVE") {
+    return activeStatuses;
+  }
+
+  if (value === "ALL") {
+    return allStatuses;
+  }
+
+  return allStatuses.includes(String(value)) ? [String(value)] : null;
+}
+
 function serializeMatchEvent(event: {
   id: string;
   matchId: string;
@@ -485,24 +522,311 @@ app.get<{ Params: { discordId: string } }>(
   }
 );
 
-app.patch<{
-  Params: { lobbyId: string };
-  Body: { discordChannelId?: unknown; discordMessageId?: unknown };
-}>("/api/v1/lobbies/:lobbyId/discord-message", async (request, reply) => {
-  const { discordChannelId, discordMessageId } = request.body;
+app.get<{ Querystring: { status?: string } }>("/api/v1/mod/lobbies", async (request, reply) => {
+  const statuses = parseLobbyStatusFilter(request.query.status);
+
+  if (!statuses) {
+    return jsonError(reply, 400, "INVALID_STATUS");
+  }
+
+  const lobbies = await prisma.lobby.findMany({
+    where: {
+      status: {
+        in: statuses as never
+      }
+    },
+    include: {
+      host: true,
+      participants: {
+        include: {
+          user: true
+        },
+        orderBy: {
+          joinedAt: "asc"
+        }
+      },
+      match: true
+    },
+    orderBy: {
+      createdAt: "desc"
+    },
+    take: 50
+  });
+
+  return {
+    success: true,
+    lobbies: lobbies.map((lobby) => {
+      const joinedParticipants = getJoinedParticipants(lobby.participants);
+
+      return {
+        id: lobby.id,
+        mode: lobby.mode,
+        playerCount: lobby.maxPlayers,
+        status: lobby.status,
+        createdByDiscordId: lobby.host.discordId,
+        createdByUsername: lobby.host.displayName,
+        scheduledAt: lobby.scheduledAt?.toISOString() ?? null,
+        participantCount: joinedParticipants.length,
+        participants: lobby.participants.map((participant) => ({
+          discordId: participant.user.discordId,
+          username: participant.user.displayName,
+          status: participant.status,
+          joinedAt: participant.joinedAt.toISOString()
+        })),
+        discordChannelId: lobby.channelId,
+        discordMessageId: lobby.discordMessageId,
+        matchCode: lobby.match?.code ?? null
+      };
+    })
+  };
+});
+
+app.get<{ Params: { discordId: string } }>(
+  "/api/v1/mod/users/:discordId/active-lobby",
+  async (request) => {
+    const lobby = await findActiveLobbyForDiscordUser(request.params.discordId);
+
+    return {
+      success: true,
+      lobby: lobby ? await serializeLobby(lobby.id) : null
+    };
+  }
+);
+
+app.post<{ Params: { lobbyId: string }; Body: RemoveParticipantBody }>(
+  "/api/v1/mod/lobbies/:lobbyId/participants/remove",
+  async (request, reply) => {
+    const { requestedByDiscordId, targetDiscordId, reason } = request.body;
+
+    if (!isNonEmptyString(requestedByDiscordId)) {
+      return jsonError(reply, 400, "requestedByDiscordId is required.");
+    }
+
+    if (!isNonEmptyString(targetDiscordId)) {
+      return jsonError(reply, 400, "targetDiscordId is required.");
+    }
+
+    const lobby = await prisma.lobby.findUnique({
+      where: {
+        id: request.params.lobbyId
+      },
+      include: {
+        participants: {
+          include: {
+            user: true
+          }
+        }
+      }
+    });
+
+    if (!lobby) {
+      return jsonError(reply, 404, "LOBBY_NOT_FOUND");
+    }
+
+    if (lobby.status === "IN_PROGRESS" || lobby.status === "GAME_STARTING") {
+      return jsonError(reply, 400, "CANNOT_MODIFY_IN_PROGRESS");
+    }
+
+    const participant = lobby.participants.find(
+      (candidate) =>
+        candidate.user.discordId === targetDiscordId &&
+        candidate.status === "JOINED"
+    );
+
+    if (!participant) {
+      return jsonError(reply, 404, "USER_NOT_IN_LOBBY");
+    }
+
+    const now = new Date();
+
+    await prisma.$transaction([
+      prisma.lobbyParticipant.update({
+        where: {
+          id: participant.id
+        },
+        data: {
+          status: "REMOVED_BY_MOD",
+          leftAt: now
+        }
+      }),
+      prisma.lobby.update({
+        where: {
+          id: lobby.id
+        },
+        data: {
+          status: lobby.status === "READY" ? "OPEN" : lobby.status
+        }
+      }),
+      prisma.modAction.create({
+        data: {
+          lobbyId: lobby.id,
+          moderatorDiscordId: requestedByDiscordId,
+          action: "REMOVE_PARTICIPANT",
+          targetDiscordId,
+          reason: isNonEmptyString(reason) ? reason : "Moderator removal"
+        }
+      })
+    ]);
+
+    return {
+      success: true,
+      lobby: await serializeLobby(lobby.id)
+    };
+  }
+);
+
+app.post<{ Params: { lobbyId: string }; Body: ModeratorBody }>(
+  "/api/v1/mod/lobbies/:lobbyId/void",
+  async (request, reply) => {
+    const { requestedByDiscordId, reason } = request.body;
+
+    if (!isNonEmptyString(requestedByDiscordId)) {
+      return jsonError(reply, 400, "requestedByDiscordId is required.");
+    }
+
+    const lobby = await prisma.lobby.findUnique({
+      where: {
+        id: request.params.lobbyId
+      }
+    });
+
+    if (!lobby) {
+      return jsonError(reply, 404, "LOBBY_NOT_FOUND");
+    }
+
+    if (lobby.status === "VOIDED") {
+      return jsonError(reply, 409, "LOBBY_ALREADY_CLOSED");
+    }
+
+    await prisma.$transaction([
+      prisma.lobby.update({
+        where: {
+          id: lobby.id
+        },
+        data: {
+          status: "VOIDED"
+        }
+      }),
+      prisma.modAction.create({
+        data: {
+          lobbyId: lobby.id,
+          moderatorDiscordId: requestedByDiscordId,
+          action: "VOID_LOBBY",
+          reason: isNonEmptyString(reason) ? reason : undefined
+        }
+      })
+    ]);
+
+    return {
+      success: true,
+      lobby: await serializeLobby(lobby.id)
+    };
+  }
+);
+
+app.post<{ Params: { lobbyId: string }; Body: ModeratorBody }>(
+  "/api/v1/mod/lobbies/:lobbyId/release",
+  async (request, reply) => {
+    const { requestedByDiscordId, reason } = request.body;
+
+    if (!isNonEmptyString(requestedByDiscordId)) {
+      return jsonError(reply, 400, "requestedByDiscordId is required.");
+    }
+
+    const lobby = await prisma.lobby.findUnique({
+      where: {
+        id: request.params.lobbyId
+      },
+      include: {
+        participants: true
+      }
+    });
+
+    if (!lobby) {
+      return jsonError(reply, 404, "LOBBY_NOT_FOUND");
+    }
+
+    const now = new Date();
+
+    await prisma.$transaction([
+      prisma.lobbyParticipant.updateMany({
+        where: {
+          lobbyId: lobby.id,
+          status: "JOINED"
+        },
+        data: {
+          status: "RELEASED_BY_MOD",
+          leftAt: now
+        }
+      }),
+      prisma.lobby.update({
+        where: {
+          id: lobby.id
+        },
+        data: {
+          status: "VOIDED"
+        }
+      }),
+      prisma.modAction.create({
+        data: {
+          lobbyId: lobby.id,
+          moderatorDiscordId: requestedByDiscordId,
+          action: "RELEASE_LOBBY_PLAYERS",
+          reason: isNonEmptyString(reason) ? reason : "Stuck lobby recovery"
+        }
+      })
+    ]);
+
+    return {
+      success: true,
+      lobby: await serializeLobby(lobby.id)
+    };
+  }
+);
+
+async function updateLobbyMessage(
+  lobbyId: string,
+  body: UpdateLobbyMessageBody,
+  reply: FastifyReply
+) {
+  const { requestedByDiscordId, discordChannelId, discordMessageId, moderator } = body;
 
   if (!isNonEmptyString(discordChannelId) || !isNonEmptyString(discordMessageId)) {
     return jsonError(reply, 400, "INVALID_DISCORD_MESSAGE");
   }
 
+  if (!isNonEmptyString(requestedByDiscordId)) {
+    return jsonError(reply, 400, "requestedByDiscordId is required.");
+  }
+
   const lobby = await prisma.lobby.findUnique({
     where: {
-      id: request.params.lobbyId
+      id: lobbyId
+    },
+    include: {
+      host: true,
+      participants: {
+        include: {
+          user: true
+        }
+      }
     }
   });
 
   if (!lobby) {
     return jsonError(reply, 404, "LOBBY_NOT_FOUND");
+  }
+
+  const ownsActiveLobby =
+    lobby.host.discordId === requestedByDiscordId ||
+    lobby.participants.some(
+      (participant) =>
+        participant.status === "JOINED" &&
+        participant.user.discordId === requestedByDiscordId
+    );
+
+  if (!ownsActiveLobby && moderator !== true) {
+    return jsonError(reply, 403, "USER_NOT_IN_ACTIVE_LOBBY");
   }
 
   await prisma.lobby.update({
@@ -515,10 +839,38 @@ app.patch<{
     }
   });
 
+  if (moderator === true) {
+    await prisma.modAction.create({
+      data: {
+        lobbyId: lobby.id,
+        moderatorDiscordId: requestedByDiscordId,
+        action: "RECREATE_LOBBY_MESSAGE",
+        payload: {
+          discordChannelId,
+          discordMessageId
+        }
+      }
+    });
+  }
+
   return {
     success: true,
     lobby: await serializeLobby(lobby.id)
   };
+}
+
+app.patch<{
+  Params: { lobbyId: string };
+  Body: UpdateLobbyMessageBody;
+}>("/api/v1/lobbies/:lobbyId/message", async (request, reply) => {
+  return updateLobbyMessage(request.params.lobbyId, request.body, reply);
+});
+
+app.patch<{
+  Params: { lobbyId: string };
+  Body: UpdateLobbyMessageBody;
+}>("/api/v1/lobbies/:lobbyId/discord-message", async (request, reply) => {
+  return updateLobbyMessage(request.params.lobbyId, request.body, reply);
 });
 
 app.post<{ Params: { lobbyId: string }; Body: RequestedByBody }>(

@@ -95,6 +95,8 @@ describe("lobby lifecycle helpers", () => {
     expect(countJoinedParticipants(participants)).toBe(1);
     expect(isBlockingParticipantStatus(LobbyParticipantStatus.Joined)).toBe(true);
     expect(isBlockingParticipantStatus(LobbyParticipantStatus.NoShow)).toBe(false);
+    expect(isBlockingParticipantStatus(LobbyParticipantStatus.RemovedByMod)).toBe(false);
+    expect(isBlockingParticipantStatus(LobbyParticipantStatus.ReleasedByMod)).toBe(false);
   });
 
   it("resolves player slots by join order without colors", () => {

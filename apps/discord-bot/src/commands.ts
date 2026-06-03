@@ -54,7 +54,39 @@ export const developmentCommands = [
     ),
   new SlashCommandBuilder()
     .setName("lobim")
-    .setDescription("Reopen your active lobby controls.")
+    .setDescription("Reopen your active lobby controls."),
+  new SlashCommandBuilder()
+    .setName("lobiler")
+    .setDescription("Moderator: list lobbies.")
+    .addStringOption((option) =>
+      option
+        .setName("status")
+        .setDescription("Lobby status filter.")
+        .setRequired(false)
+        .addChoices(
+          { name: "Active", value: "ACTIVE" },
+          { name: "All", value: "ALL" },
+          { name: "Open", value: "OPEN" },
+          { name: "Ready", value: "READY" },
+          { name: "Game Starting", value: "GAME_STARTING" },
+          { name: "In Progress", value: "IN_PROGRESS" },
+          { name: "Cancelled", value: "CANCELLED" },
+          { name: "Expired", value: "EXPIRED" },
+          { name: "Dissolved", value: "DISSOLVED" },
+          { name: "Cancelled Missing Players", value: "CANCELLED_MISSING_PLAYERS" },
+          { name: "Ended", value: "ENDED" },
+          { name: "Voided", value: "VOIDED" }
+        )
+    ),
+  new SlashCommandBuilder()
+    .setName("lobi-bul")
+    .setDescription("Moderator: find a user's active lobby.")
+    .addUserOption((option) =>
+      option
+        .setName("user")
+        .setDescription("User to inspect.")
+        .setRequired(true)
+    )
 ];
 
 export const developmentCommandPayloads = developmentCommands.map((command) =>

@@ -42,7 +42,9 @@ export enum LobbyParticipantStatus {
   Left = "LEFT",
   NoShow = "NO_SHOW",
   RemovedNoShow = "REMOVED_NO_SHOW",
-  RemovedByHost = "REMOVED_BY_HOST"
+  RemovedByHost = "REMOVED_BY_HOST",
+  RemovedByMod = "REMOVED_BY_MOD",
+  ReleasedByMod = "RELEASED_BY_MOD"
 }
 
 export enum LobbyDissolutionVoteStatus {

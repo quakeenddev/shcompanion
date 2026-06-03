@@ -40,6 +40,8 @@ enum LobbyParticipantStatus {
   NO_SHOW
   REMOVED_NO_SHOW
   REMOVED_BY_HOST
+  REMOVED_BY_MOD
+  RELEASED_BY_MOD
 }
 
 enum LobbyDissolutionVoteStatus {
@@ -210,6 +212,7 @@ model Lobby {
   match        Match?             @relation("LobbyMatch")
   dissolutionVotes LobbyDissolutionVote[]
   auditRecords LobbyAuditRecord[]
+  modActions   ModAction[]
   reports      Report[]
 }
 
@@ -298,6 +301,21 @@ model LobbyAuditRecord {
   lobby                Lobby    @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
 
   @@index([lobbyId, action])
+}
+
+model ModAction {
+  id                 String   @id @default(cuid())
+  lobbyId            String?
+  moderatorDiscordId String
+  action             String
+  targetDiscordId    String?
+  reason             String?
+  payload            Json?
+  createdAt          DateTime @default(now())
+  lobby              Lobby?   @relation(fields: [lobbyId], references: [id], onDelete: SetNull)
+
+  @@index([lobbyId, action])
+  @@index([moderatorDiscordId, action])
 }
 
 model Report {

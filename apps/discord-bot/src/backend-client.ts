@@ -52,6 +52,21 @@ export type LobbyView = {
   } | null;
 };
 
+export type CompactLobbyView = {
+  id: string;
+  mode: GameMode;
+  playerCount: number;
+  status: LobbyStatus;
+  createdByDiscordId: string;
+  createdByUsername?: string | null;
+  scheduledAt: string | null;
+  participantCount: number;
+  participants: LobbyParticipantView[];
+  discordChannelId: string;
+  discordMessageId?: string | null;
+  matchCode?: string | null;
+};
+
 type SuccessResponse<T> = {
   success: true;
 } & T;
@@ -147,16 +162,20 @@ export class BackendClient {
 
   async updateLobbyDiscordMessage(input: {
     lobbyId: string;
+    requestedByDiscordId: string;
     discordChannelId: string;
     discordMessageId: string;
+    moderator?: boolean;
   }): Promise<LobbyView> {
     const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
-      `/lobbies/${input.lobbyId}/discord-message`,
+      `/lobbies/${input.lobbyId}/message`,
       {
         method: "PATCH",
         body: {
+          requestedByDiscordId: input.requestedByDiscordId,
           discordChannelId: input.discordChannelId,
-          discordMessageId: input.discordMessageId
+          discordMessageId: input.discordMessageId,
+          moderator: input.moderator
         }
       }
     );
@@ -358,6 +377,82 @@ export class BackendClient {
     return response.matchCode;
   }
 
+  async listModeratorLobbies(status?: string): Promise<CompactLobbyView[]> {
+    const suffix = status ? `?status=${encodeURIComponent(status)}` : "";
+    const response = await this.request<SuccessResponse<{ lobbies: unknown[] }>>(
+      `/mod/lobbies${suffix}`,
+      {
+        method: "GET"
+      }
+    );
+
+    return response.lobbies.map(assertCompactLobbyView);
+  }
+
+  async getModeratorActiveLobby(discordId: string): Promise<LobbyView | null> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown | null }>>(
+      `/mod/users/${discordId}/active-lobby`,
+      {
+        method: "GET"
+      }
+    );
+
+    return response.lobby ? assertLobbyView(response.lobby) : null;
+  }
+
+  async moderatorRemoveParticipant(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+    targetDiscordId: string;
+    reason?: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/mod/lobbies/${input.lobbyId}/participants/remove`,
+      {
+        method: "POST",
+        body: input
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async moderatorVoidLobby(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+    reason?: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/mod/lobbies/${input.lobbyId}/void`,
+      {
+        method: "POST",
+        body: input
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async moderatorReleaseLobby(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+    reason?: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/mod/lobbies/${input.lobbyId}/release`,
+      {
+        method: "POST",
+        body: input
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  getRequestUrl(path: string): string {
+    return `${this.baseUrl}${path}`;
+  }
+
   private async request<T>(
     path: string,
     options: {
@@ -380,6 +475,7 @@ export class BackendClient {
       console.error("Backend network request failed", {
         method: options.method,
         path,
+        url: this.getRequestUrl(path),
         error
       });
       throw new BackendNetworkError("Backend network request failed.", error);
@@ -392,6 +488,7 @@ export class BackendClient {
       console.error("Backend returned an error response", {
         method: options.method,
         path,
+        url: this.getRequestUrl(path),
         status: response.status,
         responseBody: data
       });
@@ -448,6 +545,14 @@ function assertLobbyView(value: unknown): LobbyView {
   return value;
 }
 
+function assertCompactLobbyView(value: unknown): CompactLobbyView {
+  if (!isCompactLobbyView(value)) {
+    throw new BackendResponseShapeError("Backend compact lobby response shape is invalid.", value);
+  }
+
+  return value;
+}
+
 function isLobbyView(value: unknown): value is LobbyView {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -492,6 +597,27 @@ function isLobbyParticipantView(value: unknown): value is LobbyParticipantView {
     typeof participant.discordId === "string" &&
     Object.values(LobbyParticipantStatus).includes(participant.status as LobbyParticipantStatus) &&
     typeof participant.joinedAt === "string"
+  );
+}
+
+function isCompactLobbyView(value: unknown): value is CompactLobbyView {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const lobby = value as Partial<CompactLobbyView>;
+
+  return (
+    typeof lobby.id === "string" &&
+    Object.values(GameMode).includes(lobby.mode as GameMode) &&
+    typeof lobby.playerCount === "number" &&
+    Object.values(LobbyStatus).includes(lobby.status as LobbyStatus) &&
+    typeof lobby.createdByDiscordId === "string" &&
+    (typeof lobby.scheduledAt === "string" || lobby.scheduledAt === null) &&
+    typeof lobby.participantCount === "number" &&
+    Array.isArray(lobby.participants) &&
+    lobby.participants.every(isLobbyParticipantView) &&
+    typeof lobby.discordChannelId === "string"
   );
 }
 

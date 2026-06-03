@@ -1,12 +1,15 @@
 import {
   ActionRowBuilder,
+  ButtonBuilder,
   ButtonInteraction,
+  ButtonStyle,
   ChatInputCommandInteraction,
   Client,
   GatewayIntentBits,
   MessageFlags,
   ModalBuilder,
   ModalSubmitInteraction,
+  PermissionsBitField,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
   TextInputBuilder,
@@ -21,6 +24,7 @@ import {
   BackendError,
   BackendNetworkError,
   BackendResponseShapeError,
+  type CompactLobbyView,
   type LobbyView
 } from "./backend-client.js";
 import { loadDiscordBotEnv } from "./env.js";
@@ -99,6 +103,12 @@ function formatBackendError(error: unknown): string {
       TOO_EARLY_FOR_MISSING_CANCEL: "Eksik katilim nedeniyle oyunu dagitma secenegi oyun saati geldiginde acilir.",
       NO_MISSING_PLAYERS_SELECTED: "Lutfen gelmeyen en az bir oyuncu sec.",
       MATCH_ALREADY_CREATED: "Bu lobi icin match code zaten olusturulmus.",
+      MODERATOR_ONLY: "Bu komutu sadece moderatorler kullanabilir.",
+      USER_NOT_IN_ACTIVE_LOBBY: "Bu kullanicinin aktif lobisi yok.",
+      LOBBY_ALREADY_CLOSED: "Bu lobi zaten kapali.",
+      CANNOT_MODIFY_IN_PROGRESS: "Oyun baslamis lobiler bu islemle degistirilemez.",
+      INVALID_STATUS: "Gecersiz lobi status filtresi.",
+      USER_NOT_IN_LOBBY: "Kullanici bu lobide degil.",
       ACTIVE_LOBBY_EXISTS:
         "Zaten aktif bir lobidesin. Lobini tekrar acmak icin /lobim komutunu kullanabilir, oradan cikabilir veya host isen oyunu bozabilirsin.",
       NO_ACTIVE_LOBBY: "Aktif bir lobin yok."
@@ -138,11 +148,46 @@ function logMissingOption(commandName: string, optionName: string): void {
   );
 }
 
-async function saveLobbyMessage(lobby: LobbyView, message: Message): Promise<void> {
+function isModerator(interaction: Interaction): boolean {
+  if (!interaction.inGuild()) {
+    return false;
+  }
+
+  if (interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
+    return true;
+  }
+
+  if (env.moderatorRoleIds.length === 0) {
+    return false;
+  }
+
+  const roles = interaction.member?.roles;
+
+  if (!roles) {
+    return false;
+  }
+
+  const roleIds = Array.isArray(roles)
+    ? roles
+    : "cache" in roles
+      ? [...roles.cache.keys()]
+      : [];
+
+  return roleIds.some((roleId) => env.moderatorRoleIds.includes(roleId));
+}
+
+async function saveLobbyMessage(
+  lobby: LobbyView,
+  message: Message,
+  requestedByDiscordId: string,
+  moderator = false
+): Promise<void> {
   await backend.updateLobbyDiscordMessage({
     lobbyId: lobby.id,
+    requestedByDiscordId,
     discordChannelId: message.channelId,
-    discordMessageId: message.id
+    discordMessageId: message.id,
+    moderator
   });
 }
 
@@ -179,6 +224,72 @@ function getJoinedParticipantOptions(lobby: LobbyView) {
     }));
 }
 
+function formatLobbyDate(value: string | null): string {
+  if (!value) {
+    return "Not scheduled";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString("tr-TR", {
+        dateStyle: "short",
+        timeStyle: "short",
+        timeZone: "Europe/Istanbul"
+      });
+}
+
+function renderCompactLobbyList(lobbies: CompactLobbyView[]): string {
+  if (lobbies.length === 0) {
+    return "Lobi bulunamadi.";
+  }
+
+  const visible = lobbies.slice(0, 10).map((lobby, index) => {
+    const participants = lobby.participants
+      .filter((participant) => participant.status === LobbyParticipantStatus.Joined)
+      .map((participant) => `<@${participant.discordId}>`)
+      .join(", ") || "Yok";
+
+    return [
+      `${index + 1}) Lobby: ${lobby.id}`,
+      `Status: ${lobby.status}`,
+      `Players: ${lobby.participantCount}/${lobby.playerCount}`,
+      `Host: <@${lobby.createdByDiscordId}>`,
+      `Schedule: ${formatLobbyDate(lobby.scheduledAt)}`,
+      `Participants: ${participants}`
+    ].join("\n");
+  });
+
+  if (lobbies.length > 10) {
+    visible.push(`Ilk 10 lobi gosteriliyor. Toplam: ${lobbies.length}`);
+  }
+
+  return visible.join("\n\n");
+}
+
+function renderModeratorLobbyActions(lobby: LobbyView, targetDiscordId: string): ActionRowBuilder<ButtonBuilder>[] {
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`mod-reopen:${lobby.id}:${targetDiscordId}`)
+        .setLabel("Lobiyi Yeniden Ac")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`mod-remove:${lobby.id}:${targetDiscordId}`)
+        .setLabel("Kullaniciyi Lobiden Cikar")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`mod-void:${lobby.id}:${targetDiscordId}`)
+        .setLabel("Lobiyi Kapat")
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(`mod-release:${lobby.id}:${targetDiscordId}`)
+        .setLabel("Oyunculari Serbest Birak")
+        .setStyle(ButtonStyle.Danger)
+    )
+  ];
+}
+
 async function updateStoredLobbyMessage(lobby: LobbyView): Promise<void> {
   const channel = await client.channels.fetch(lobby.discordChannelId).catch(() => null);
 
@@ -193,7 +304,7 @@ async function updateStoredLobbyMessage(lobby: LobbyView): Promise<void> {
   if (!message) {
     if (isSendableChannel(channel)) {
       const recreatedMessage = await sendLobbyMessage(channel, lobby);
-      await saveLobbyMessage(lobby, recreatedMessage);
+      await saveLobbyMessage(lobby, recreatedMessage, lobby.createdByDiscordId);
     }
     return;
   }
@@ -244,13 +355,111 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
       flags: MessageFlags.Ephemeral
     });
 
+    let lobby: LobbyView;
+
     try {
-      const lobby = await backend.getActiveLobby(interaction.user.id);
+      console.info("Fetching active lobby for /lobim", {
+        commandName: interaction.commandName,
+        requesterDiscordId: interaction.user.id,
+        backendUrl: backend.getRequestUrl(`/users/${interaction.user.id}/active-lobby`)
+      });
+      lobby = await backend.getActiveLobby(interaction.user.id);
+    } catch (error) {
+      logInteractionError("/lobim active lobby lookup failed", {
+        commandName: interaction.commandName,
+        requesterDiscordId: interaction.user.id,
+        backendUrl: backend.getRequestUrl(`/users/${interaction.user.id}/active-lobby`)
+      }, error);
+
+      await interaction.editReply({
+        content: formatBackendError(error)
+      });
+      return;
+    }
+
+    try {
       const message = await sendLobbyMessage(interaction.channel, lobby);
-      await saveLobbyMessage(lobby, message);
+      await saveLobbyMessage(lobby, message, interaction.user.id);
 
       await interaction.editReply({
         content: "Aktif lobin yeniden acildi."
+      });
+    } catch (error) {
+      logInteractionError("/lobim render or message recreation failed", {
+        commandName: interaction.commandName,
+        requesterDiscordId: interaction.user.id,
+        lobbyId: lobby.id
+      }, error);
+      await interaction.editReply({
+        content: error instanceof BackendNetworkError
+          ? formatBackendError(error)
+          : "Lobi bulundu ama mesaj olusturulurken hata olustu. Moderatore haber ver."
+      });
+    }
+
+    return;
+  }
+
+  if (interaction.commandName === "lobiler") {
+    await interaction.deferReply({
+      flags: MessageFlags.Ephemeral
+    });
+
+    if (!isModerator(interaction)) {
+      await interaction.editReply({
+        content: "Bu komutu sadece moderatorler kullanabilir."
+      });
+      return;
+    }
+
+    const status = interaction.options.getString("status", false) ?? "ACTIVE";
+
+    try {
+      const lobbies = await backend.listModeratorLobbies(status);
+
+      await interaction.editReply({
+        embeds: [{
+          title: status === "ALL" ? "All Lobbies" : "Active Lobbies",
+          description: renderCompactLobbyList(lobbies),
+          color: 0xb91c1c
+        }]
+      });
+    } catch (error) {
+      await interaction.editReply({
+        content: formatBackendError(error)
+      });
+    }
+
+    return;
+  }
+
+  if (interaction.commandName === "lobi-bul") {
+    await interaction.deferReply({
+      flags: MessageFlags.Ephemeral
+    });
+
+    if (!isModerator(interaction)) {
+      await interaction.editReply({
+        content: "Bu komutu sadece moderatorler kullanabilir."
+      });
+      return;
+    }
+
+    const targetUser = interaction.options.getUser("user", true);
+
+    try {
+      const lobby = await backend.getModeratorActiveLobby(targetUser.id);
+
+      if (!lobby) {
+        await interaction.editReply({
+          content: "Bu kullanicinin aktif lobisi yok."
+        });
+        return;
+      }
+
+      await interaction.editReply({
+        embeds: [renderLobbyEmbed(lobby)],
+        components: renderModeratorLobbyActions(lobby, targetUser.id)
       });
     } catch (error) {
       await interaction.editReply({
@@ -342,7 +551,7 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
     });
 
     const message = await interaction.fetchReply();
-    await saveLobbyMessage(lobby, message);
+    await saveLobbyMessage(lobby, message, interaction.user.id);
   } catch (error) {
     logInteractionError("Lobby creation failed", {
       commandName: interaction.commandName,
@@ -362,6 +571,82 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
 
 async function handleButton(interaction: ButtonInteraction): Promise<void> {
   const [action, lobbyId, value] = interaction.customId.split(":");
+
+  if (action.startsWith("mod-")) {
+    if (!isModerator(interaction)) {
+      await interaction.reply({
+        content: "Bu islemi sadece moderatorler kullanabilir.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    await interaction.deferReply({
+      flags: MessageFlags.Ephemeral
+    });
+
+    try {
+      if (action === "mod-reopen") {
+        const lobby = await backend.getLobby(lobbyId);
+        const message = await sendLobbyMessage(interaction.channel, lobby);
+        await saveLobbyMessage(lobby, message, interaction.user.id, true);
+        await interaction.editReply({
+          content: "Lobi yeniden acildi."
+        });
+        return;
+      }
+
+      if (action === "mod-remove") {
+        const lobby = await backend.moderatorRemoveParticipant({
+          lobbyId,
+          requestedByDiscordId: interaction.user.id,
+          targetDiscordId: value,
+          reason: "Moderator removal"
+        });
+        await updateStoredLobbyMessage(lobby);
+        await interaction.editReply({
+          content: "Kullanici lobiden cikarildi."
+        });
+        return;
+      }
+
+      if (action === "mod-void") {
+        const lobby = await backend.moderatorVoidLobby({
+          lobbyId,
+          requestedByDiscordId: interaction.user.id,
+          reason: "Moderator closed lobby"
+        });
+        await updateStoredLobbyMessage(lobby);
+        await interaction.editReply({
+          content: "Lobi moderator tarafindan kapatildi."
+        });
+        return;
+      }
+
+      if (action === "mod-release") {
+        const lobby = await backend.moderatorReleaseLobby({
+          lobbyId,
+          requestedByDiscordId: interaction.user.id,
+          reason: "Stuck lobby recovery"
+        });
+        await updateStoredLobbyMessage(lobby);
+        await interaction.editReply({
+          content: "Oyuncular serbest birakildi."
+        });
+      }
+    } catch (error) {
+      logInteractionError("Moderator lobby action failed", {
+        customId: interaction.customId,
+        lobbyId,
+        moderatorDiscordId: interaction.user.id
+      }, error);
+      await interaction.editReply({
+        content: formatBackendError(error)
+      });
+    }
+
+    return;
+  }
 
   if (action === "lobby-join") {
     await interaction.deferUpdate();
