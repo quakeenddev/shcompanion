@@ -34,7 +34,7 @@ const env = loadDiscordBotEnv();
 const backend = new BackendClient(env.botApiBaseUrl, env.botApiKey);
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
 type SendableChannel = {
@@ -683,7 +683,9 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
     return;
   }
 
-  await interaction.deferReply();
+  await interaction.deferReply({
+    flags: MessageFlags.Ephemeral
+  });
 
   try {
     const lobby = await backend.createLobby({
@@ -696,13 +698,13 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
       scheduledAt
     });
 
-    await interaction.editReply({
-      embeds: [renderLobbyEmbed(lobby)],
-      components: renderLobbyComponents(lobby)
-    });
-
-    const message = await interaction.fetchReply();
+    const channel = await resolveInteractionChannel(interaction);
+    const message = await sendLobbyMessage(channel, lobby);
     await saveLobbyMessage(lobby, message, interaction.user.id);
+
+    await interaction.editReply({
+      content: `Lobi olusturuldu. Lobi mesaji kanala gonderildi: ${message.url}`
+    });
   } catch (error) {
     logInteractionError("Lobby creation failed", {
       commandName: interaction.commandName,
