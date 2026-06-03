@@ -1,0 +1,237 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum GameMode {
+  COMPETITIVE
+  CASUAL
+  TRAINING
+}
+
+enum GameVariant {
+  STANDARD
+  STANDARD_META
+  FREEPLAY
+  MAYHEM
+}
+
+enum LobbyStatus {
+  OPEN
+  READY
+  CLOSED
+}
+
+enum PlayerColor {
+  RED
+  BLUE
+  GREEN
+  YELLOW
+  ORANGE
+  PURPLE
+  BROWN
+  WHITE
+  BLACK
+  PINK
+}
+
+enum MatchStatus {
+  CREATED
+  STARTED
+  IN_PROGRESS
+  ENDED
+  UNDER_REVIEW
+  COMPLETED
+  LOCKED_PENDING_REVIEW
+  VOIDED
+}
+
+enum ReviewStatus {
+  NONE
+  PENDING
+  IN_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+enum MatchEventType {
+  MATCH_CREATED
+  LOBBY_CREATED
+  PLAYER_JOINED_LOBBY
+  MATCH_STARTED
+  SEAT_COLOR_LOCKED
+  PLAYER_SNAPSHOT_TAKEN
+  DICE_COLOR_LOCKED
+  GOVERNMENT_NOMINATED
+  PRESIDENT_TURN_STARTED
+  PRESIDENT_PASS
+  CHANCELLOR_SELECTED
+  SOFT_VALIDATION_WARNING
+  RULE_VIOLATION_WARNING
+  VOTE_RECORDED
+  VOTE_FAILED
+  CLAIMS_SUBMITTED
+  POLICY_PHASE_STARTED
+  POLICY_ENACTED
+  POWER_RESOLVED
+  CARD_DRAWN
+  CARD_FLIPPED
+  CARD_DISCARDED
+  CARD_SENT_TO_CHANCELLOR
+  POLICY_RESULT_DETECTED
+  POLICY_RESULT_CONFIRMED
+  CHANCELLOR_CLAIM_SUBMITTED
+  PRESIDENT_CLAIM_SUBMITTED
+  ROUND_LOGGED
+  DECK_SHUFFLED
+  SPECIAL_POWER_USED
+  PLAYER_KILLED
+  PLAYER_DISCONNECTED
+  PLAYER_RECONNECTED
+  HOST_OVERRIDE
+  MOD_AUDIT_CORRECTION
+  MATCH_ENDED
+  MATCH_COMPLETED
+  ROLECHECK_STARTED
+  ROLECHECK_COMPLETED
+  ROLE_MISMATCH
+  MATCH_CONFIRMATION_SENT
+  PLAYER_CONFIRMATION_SUBMITTED
+  MATCH_CONFIRMED
+  MATCH_DISPUTED
+  REPORT_SUBMITTED
+  RISK_SIGNAL_CREATED
+  AUDIT_CORRECTION_SUBMITTED
+  REVIEW_STATUS_CHANGED
+}
+
+enum MatchEventSource {
+  SYSTEM
+  HOST
+  PLAYER
+  MODERATOR
+  TABLETOP
+  DISCORD_BOT
+}
+
+enum TrustWeight {
+  LOW
+  MEDIUM
+  HIGH
+  VERY_HIGH
+}
+
+model User {
+  id              String             @id @default(cuid())
+  discordId       String             @unique
+  displayName     String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  steamIdentity   SteamIdentity?
+  lobbyHosts      Lobby[]            @relation("LobbyHost")
+  lobbyParticipants LobbyParticipant[]
+  matchPlayers    MatchPlayer[]
+  matchEvents     MatchEvent[]       @relation("MatchEventActor")
+}
+
+model SteamIdentity {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  steam64Id String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Lobby {
+  id           String             @id @default(cuid())
+  code         String             @unique
+  guildId      String
+  channelId    String
+  mode         GameMode
+  variant      GameVariant        @default(STANDARD)
+  maxPlayers   Int
+  status       LobbyStatus        @default(OPEN)
+  scheduledAt  DateTime           @default(now())
+  seatsLockedAt DateTime          @default(now())
+  hostUserId   String
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  host         User               @relation("LobbyHost", fields: [hostUserId], references: [id])
+  participants LobbyParticipant[]
+  match        Match?             @relation("LobbyMatch")
+}
+
+model LobbyParticipant {
+  id        String      @id @default(cuid())
+  lobbyId   String
+  userId    String
+  selectedColor PlayerColor
+  joinedAt  DateTime    @default(now())
+  lobby     Lobby       @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([lobbyId, userId])
+  @@unique([lobbyId, selectedColor])
+}
+
+model Match {
+  id           String        @id @default(cuid())
+  lobbyId      String?       @unique
+  code         String        @unique
+  mode         GameMode
+  variant      GameVariant   @default(STANDARD)
+  playerCount  Int
+  scheduledAt   DateTime?
+  seatsLockedAt DateTime?
+  status       MatchStatus   @default(CREATED)
+  reviewStatus ReviewStatus  @default(NONE)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  lobby        Lobby?        @relation("LobbyMatch", fields: [lobbyId], references: [id])
+  players      MatchPlayer[]
+  events       MatchEvent[]
+}
+
+model MatchPlayer {
+  id             String      @id @default(cuid())
+  matchId        String
+  userId         String
+  startingColor  PlayerColor
+  endingColor    PlayerColor?
+  seatLockedAt   DateTime?
+  createdAt      DateTime    @default(now())
+  match          Match       @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  user           User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, userId])
+  @@unique([matchId, startingColor])
+}
+
+model MatchEvent {
+  id          String         @id @default(cuid())
+  matchId     String
+  clientEventId String
+  type        MatchEventType
+  roundIndex  Int?
+  actorUserId String?
+  actorColor  PlayerColor?
+  source      MatchEventSource
+  trustWeight TrustWeight
+  payload     Json
+  occurredAt  DateTime       @default(now())
+  createdAt   DateTime       @default(now())
+  match       Match          @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  actor       User?          @relation("MatchEventActor", fields: [actorUserId], references: [id])
+
+  @@index([matchId, occurredAt])
+  @@unique([matchId, clientEventId])
+  @@index([type])
+}

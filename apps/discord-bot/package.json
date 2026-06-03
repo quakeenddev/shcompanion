@@ -1,0 +1,26 @@
+{
+  "name": "@shc/discord-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "register-commands": "tsx src/register-commands.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@shc/elo-engine": "workspace:*",
+    "@shc/event-schema": "workspace:*",
+    "@shc/game-rules": "workspace:*",
+    "@shc/shared-types": "workspace:*",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.8"
+  }
+}

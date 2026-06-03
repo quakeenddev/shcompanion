@@ -1,0 +1,26 @@
+{
+  "name": "@shc/backend-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "@shc/elo-engine": "workspace:*",
+    "@shc/event-schema": "workspace:*",
+    "@shc/game-rules": "workspace:*",
+    "@shc/shared-types": "workspace:*",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.8"
+  }
+}
