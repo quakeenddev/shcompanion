@@ -47,6 +47,10 @@ type MessageFetchableChannel = {
   };
 };
 
+type LobbyMessageUpdateResult =
+  | { ok: true; action: "edited" | "recreated" | "fallback-edited" }
+  | { ok: false; reason: string };
+
 function parseGameMode(value: string): GameMode {
   return value as GameMode;
 }
@@ -61,6 +65,10 @@ function isSendableChannel(value: unknown): value is SendableChannel {
 
 function isMessageFetchableChannel(value: unknown): value is MessageFetchableChannel {
   return typeof value === "object" && value !== null && "messages" in value;
+}
+
+function isEphemeralMessage(message: Message): boolean {
+  return message.flags.has(MessageFlags.Ephemeral);
 }
 
 function isValidScheduleInput(value: string): boolean {
@@ -234,6 +242,109 @@ async function tryEditLobbyMessage(
   }
 }
 
+async function fetchChannel(channelId: string): Promise<unknown> {
+  return client.channels.fetch(channelId).catch((error: unknown) => {
+    logInteractionError("Discord channel fetch failed", { channelId }, error);
+    return null;
+  });
+}
+
+async function resolveInteractionChannel(interaction: Interaction): Promise<unknown> {
+  if (interaction.channel) {
+    return interaction.channel;
+  }
+
+  if (!interaction.channelId) {
+    return null;
+  }
+
+  return fetchChannel(interaction.channelId);
+}
+
+async function updateLobbyControlMessage(input: {
+  lobby: LobbyView;
+  requestedByDiscordId: string;
+  moderator?: boolean;
+  matchCode?: string;
+  fallbackMessage?: Message;
+  fallbackChannel?: unknown;
+  context: Record<string, unknown>;
+}): Promise<LobbyMessageUpdateResult> {
+  const { lobby, requestedByDiscordId, moderator = false, matchCode, fallbackMessage, fallbackChannel, context } = input;
+  const storedChannel = await fetchChannel(lobby.discordChannelId);
+
+  if (isMessageFetchableChannel(storedChannel) && lobby.discordMessageId) {
+    const storedMessage = await storedChannel.messages.fetch(lobby.discordMessageId).catch((error: unknown) => {
+      logInteractionError("Stored lobby message fetch failed", {
+        ...context,
+        lobbyId: lobby.id,
+        discordChannelId: lobby.discordChannelId,
+        discordMessageId: lobby.discordMessageId
+      }, error);
+      return null;
+    });
+
+    if (storedMessage) {
+      try {
+        await editLobbyMessage(storedMessage, lobby, matchCode);
+        return { ok: true, action: "edited" };
+      } catch (error) {
+        logInteractionError("Stored lobby message edit failed", {
+          ...context,
+          lobbyId: lobby.id,
+          discordChannelId: lobby.discordChannelId,
+          discordMessageId: lobby.discordMessageId
+        }, error);
+      }
+    }
+  }
+
+  if (fallbackMessage && !isEphemeralMessage(fallbackMessage)) {
+    try {
+      await editLobbyMessage(fallbackMessage, lobby, matchCode);
+
+      if (fallbackMessage.id !== lobby.discordMessageId || fallbackMessage.channelId !== lobby.discordChannelId) {
+        await saveLobbyMessage(lobby, fallbackMessage, requestedByDiscordId, moderator);
+      }
+
+      return { ok: true, action: "fallback-edited" };
+    } catch (error) {
+      logInteractionError("Fallback lobby message edit failed", {
+        ...context,
+        lobbyId: lobby.id,
+        fallbackMessageId: fallbackMessage.id,
+        fallbackChannelId: fallbackMessage.channelId
+      }, error);
+    }
+  }
+
+  const sendChannel = fallbackChannel ?? storedChannel;
+
+  if (isSendableChannel(sendChannel)) {
+    try {
+      const recreatedMessage = await sendLobbyMessage(sendChannel, lobby, matchCode);
+      await saveLobbyMessage(lobby, recreatedMessage, requestedByDiscordId, moderator);
+      return { ok: true, action: "recreated" };
+    } catch (error) {
+      logInteractionError("Lobby message recreate failed", {
+        ...context,
+        lobbyId: lobby.id
+      }, error);
+      return { ok: false, reason: "recreate-failed" };
+    }
+  }
+
+  return { ok: false, reason: "no-sendable-channel" };
+}
+
+function formatLobbyMessageUpdateResult(successText: string, result: LobbyMessageUpdateResult): string {
+  if (result.ok) {
+    return successText;
+  }
+
+  return `${successText} ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin.`;
+}
+
 function getJoinedParticipantOptions(lobby: LobbyView) {
   return lobby.participants
     .filter((participant) => participant.status === LobbyParticipantStatus.Joined)
@@ -327,28 +438,17 @@ function renderModeratorLobbyActions(lobby: LobbyView, targetDiscordId: string):
 }
 
 async function updateStoredLobbyMessage(lobby: LobbyView): Promise<void> {
-  const channel = await client.channels.fetch(lobby.discordChannelId).catch(() => null);
-
-  if (!isMessageFetchableChannel(channel)) {
-    return;
-  }
-
-  const message = lobby.discordMessageId
-    ? await channel.messages.fetch(lobby.discordMessageId).catch(() => null)
-    : null;
-
-  if (!message) {
-    if (isSendableChannel(channel)) {
-      const recreatedMessage = await sendLobbyMessage(channel, lobby);
-      await saveLobbyMessage(lobby, recreatedMessage, lobby.createdByDiscordId);
+  const result = await updateLobbyControlMessage({
+    lobby,
+    requestedByDiscordId: lobby.createdByDiscordId,
+    context: {
+      source: "updateStoredLobbyMessage"
     }
-    return;
-  }
-
-  await message.edit({
-    embeds: [renderLobbyEmbed(lobby)],
-    components: renderLobbyComponents(lobby)
   });
+
+  if (!result.ok) {
+    throw new Error(`Unable to update stored lobby message: ${result.reason}`);
+  }
 }
 
 async function handleChatCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -414,7 +514,8 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
     }
 
     try {
-      const message = await sendLobbyMessage(interaction.channel, lobby);
+      const channel = await resolveInteractionChannel(interaction);
+      const message = await sendLobbyMessage(channel, lobby);
       try {
         await saveLobbyMessage(lobby, message, interaction.user.id);
       } catch (error) {
@@ -638,7 +739,8 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
     try {
       if (action === "mod-reopen") {
         const lobby = await backend.getLobby(lobbyId);
-        const message = await sendLobbyMessage(interaction.channel, lobby);
+        const channel = await resolveInteractionChannel(interaction);
+        const message = await sendLobbyMessage(channel, lobby);
         try {
           await saveLobbyMessage(lobby, message, interaction.user.id, true);
         } catch (error) {
@@ -666,9 +768,20 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
           targetDiscordId: value,
           reason: "Moderator removal"
         });
-        await updateStoredLobbyMessage(lobby);
+        const updateResult = await updateLobbyControlMessage({
+          lobby,
+          requestedByDiscordId: interaction.user.id,
+          moderator: true,
+          fallbackChannel: await resolveInteractionChannel(interaction),
+          context: {
+            customId: interaction.customId,
+            lobbyId,
+            moderatorDiscordId: interaction.user.id,
+            targetDiscordId: value
+          }
+        });
         await interaction.editReply({
-          content: "Kullanici lobiden cikarildi."
+          content: formatLobbyMessageUpdateResult("Kullanici lobiden cikarildi.", updateResult)
         });
         return;
       }
@@ -679,9 +792,19 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
           requestedByDiscordId: interaction.user.id,
           reason: "Moderator closed lobby"
         });
-        await updateStoredLobbyMessage(lobby);
+        const updateResult = await updateLobbyControlMessage({
+          lobby,
+          requestedByDiscordId: interaction.user.id,
+          moderator: true,
+          fallbackChannel: await resolveInteractionChannel(interaction),
+          context: {
+            customId: interaction.customId,
+            lobbyId,
+            moderatorDiscordId: interaction.user.id
+          }
+        });
         await interaction.editReply({
-          content: "Lobi moderator tarafindan kapatildi."
+          content: formatLobbyMessageUpdateResult("Lobi moderator tarafindan kapatildi.", updateResult)
         });
         return;
       }
@@ -692,9 +815,19 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
           requestedByDiscordId: interaction.user.id,
           reason: "Stuck lobby recovery"
         });
-        await updateStoredLobbyMessage(lobby);
+        const updateResult = await updateLobbyControlMessage({
+          lobby,
+          requestedByDiscordId: interaction.user.id,
+          moderator: true,
+          fallbackChannel: await resolveInteractionChannel(interaction),
+          context: {
+            customId: interaction.customId,
+            lobbyId,
+            moderatorDiscordId: interaction.user.id
+          }
+        });
         await interaction.editReply({
-          content: "Oyuncular serbest birakildi."
+          content: formatLobbyMessageUpdateResult("Oyuncular serbest birakildi.", updateResult)
         });
       }
     } catch (error) {
@@ -721,16 +854,20 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         username: interaction.user.username
       });
 
-      const edited = await tryEditLobbyMessage(interaction.message, lobby, {
-        customId: interaction.customId,
-        lobbyId,
-        userId: interaction.user.id
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackMessage: interaction.message,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          customId: interaction.customId,
+          lobbyId,
+          userId: interaction.user.id
+        }
       });
 
       await interaction.followUp({
-        content: edited
-          ? "Lobiye katildin."
-          : "Lobiye katildin ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin.",
+        content: formatLobbyMessageUpdateResult("Lobiye katildin.", updateResult),
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -758,16 +895,20 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         requestedByDiscordId: interaction.user.id
       });
 
-      const edited = await tryEditLobbyMessage(interaction.message, lobby, {
-        customId: interaction.customId,
-        lobbyId,
-        userId: interaction.user.id
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackMessage: interaction.message,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          customId: interaction.customId,
+          lobbyId,
+          userId: interaction.user.id
+        }
       });
 
       await interaction.followUp({
-        content: edited
-          ? "Lobiden ayrildin."
-          : "Lobiden ayrildin ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin.",
+        content: formatLobbyMessageUpdateResult("Lobiden ayrildin.", updateResult),
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -828,16 +969,20 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         requestedByDiscordId: interaction.user.id
       });
 
-      const edited = await tryEditLobbyMessage(interaction.message, lobby, {
-        customId: interaction.customId,
-        lobbyId,
-        userId: interaction.user.id
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackMessage: interaction.message,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          customId: interaction.customId,
+          lobbyId,
+          userId: interaction.user.id
+        }
       });
 
       await interaction.followUp({
-        content: edited
-          ? "Lobi bozuldu."
-          : "Lobi bozuldu ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin.",
+        content: formatLobbyMessageUpdateResult("Lobi bozuldu.", updateResult),
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -859,13 +1004,20 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         requestedByDiscordId: interaction.user.id
       });
 
-      await interaction.message.edit({
-        embeds: [renderLobbyEmbed(lobby)],
-        components: renderLobbyComponents(lobby)
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackMessage: interaction.message,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          customId: interaction.customId,
+          lobbyId,
+          userId: interaction.user.id
+        }
       });
 
       await interaction.followUp({
-        content: "Fesih oylamasi baslatildi.",
+        content: formatLobbyMessageUpdateResult("Fesih oylamasi baslatildi.", updateResult),
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -889,13 +1041,24 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         vote
       });
 
-      await interaction.message.edit({
-        embeds: [renderLobbyEmbed(lobby)],
-        components: renderLobbyComponents(lobby)
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackMessage: interaction.message,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          customId: interaction.customId,
+          lobbyId,
+          userId: interaction.user.id,
+          vote
+        }
       });
 
       await interaction.followUp({
-        content: `Fesih oyunuz kaydedildi: ${vote === "YES" ? "Evet" : "Hayir"}`,
+        content: formatLobbyMessageUpdateResult(
+          `Fesih oyunuz kaydedildi: ${vote === "YES" ? "Evet" : "Hayir"}`,
+          updateResult
+        ),
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -927,13 +1090,20 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         requestedByDiscordId: interaction.user.id
       });
 
-      await interaction.message.edit({
-        embeds: [renderLobbyEmbed(lobby)],
-        components: renderLobbyComponents(lobby)
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackMessage: interaction.message,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          customId: interaction.customId,
+          lobbyId,
+          userId: interaction.user.id
+        }
       });
 
       await interaction.followUp({
-        content: "Oyun basliyor. Lobi kilitlendi.",
+        content: formatLobbyMessageUpdateResult("Oyun basliyor. Lobi kilitlendi.", updateResult),
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -1102,12 +1272,27 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
 
     try {
       const matchCode = await backend.createMatch(lobbyId);
-      const freshLobby = await refreshLobbyMessage(interaction.message, lobbyId, matchCode);
+      const freshLobby = await backend.getLobby(lobbyId);
+      const updateResult = await updateLobbyControlMessage({
+        lobby: freshLobby,
+        requestedByDiscordId: interaction.user.id,
+        matchCode,
+        fallbackMessage: interaction.message,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          customId: interaction.customId,
+          lobbyId,
+          userId: interaction.user.id,
+          matchCode
+        }
+      });
 
-      await interaction.message.edit({
-        content: `Match Code: ${matchCode}. Bu kodu ileride Tabletop Match Control Panel'e girecegiz.`,
-        embeds: [renderLobbyEmbed(freshLobby, matchCode)],
-        components: renderLobbyComponents(freshLobby)
+      await interaction.followUp({
+        content: formatLobbyMessageUpdateResult(
+          `Match Code: ${matchCode}. Bu kodu ileride Tabletop Match Control Panel'e girecegiz.`,
+          updateResult
+        ),
+        flags: MessageFlags.Ephemeral
       });
     } catch (error) {
       logInteractionError("Match creation failed", {
@@ -1159,23 +1344,20 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
       scheduledAtInput
     });
 
-    try {
-      await updateStoredLobbyMessage(lobby);
-    } catch (error) {
-      logInteractionError("Schedule update message refresh failed", {
+    const updateResult = await updateLobbyControlMessage({
+      lobby,
+      requestedByDiscordId: interaction.user.id,
+      fallbackChannel: await resolveInteractionChannel(interaction),
+      context: {
+        source: "schedule-modal",
         lobbyId,
         userId: interaction.user.id,
         scheduledAtInput
-      }, error);
-
-      await interaction.editReply({
-        content: "Tarih/saat guncellendi ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin."
-      });
-      return;
-    }
+      }
+    });
 
     await interaction.editReply({
-      content: "Tarih/saat guncellendi."
+      content: formatLobbyMessageUpdateResult("Tarih/saat guncellendi.", updateResult)
     });
   } catch (error) {
     await interaction.editReply({
@@ -1205,9 +1387,19 @@ async function handleSelectMenu(interaction: StringSelectMenuInteraction): Promi
         targetDiscordId: interaction.values[0]
       });
 
-      await updateStoredLobbyMessage(lobby);
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          source: "no-show-select",
+          lobbyId,
+          userId: interaction.user.id,
+          targetDiscordId: interaction.values[0]
+        }
+      });
       await interaction.editReply({
-        content: "Oyuncu yok olarak isaretlendi.",
+        content: formatLobbyMessageUpdateResult("Oyuncu yok olarak isaretlendi.", updateResult),
         components: []
       });
     } catch (error) {
@@ -1228,9 +1420,22 @@ async function handleSelectMenu(interaction: StringSelectMenuInteraction): Promi
         missingDiscordIds: interaction.values
       });
 
-      await updateStoredLobbyMessage(lobby);
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          source: "cancel-missing-select",
+          lobbyId,
+          userId: interaction.user.id,
+          missingDiscordIds: interaction.values
+        }
+      });
       await interaction.editReply({
-        content: "Eksik katilim nedeniyle oyun dagildi. Gelmeyen oyuncular raporlandi.",
+        content: formatLobbyMessageUpdateResult(
+          "Eksik katilim nedeniyle oyun dagildi. Gelmeyen oyuncular raporlandi.",
+          updateResult
+        ),
         components: []
       });
     } catch (error) {
@@ -1250,9 +1455,19 @@ async function handleSelectMenu(interaction: StringSelectMenuInteraction): Promi
         targetDiscordId: interaction.values[0]
       });
 
-      await updateStoredLobbyMessage(lobby);
+      const updateResult = await updateLobbyControlMessage({
+        lobby,
+        requestedByDiscordId: interaction.user.id,
+        fallbackChannel: await resolveInteractionChannel(interaction),
+        context: {
+          source: "transfer-host-select",
+          lobbyId,
+          userId: interaction.user.id,
+          targetDiscordId: interaction.values[0]
+        }
+      });
       await interaction.editReply({
-        content: "Hostluk devredildi.",
+        content: formatLobbyMessageUpdateResult("Hostluk devredildi.", updateResult),
         components: []
       });
     } catch (error) {
