@@ -156,7 +156,7 @@ export function renderLobbyComponents(
         .setCustomId(`lobby-edit-schedule:${lobby.id}:${lobby.createdByDiscordId}`)
         .setLabel("Tarih/Saat Degistir")
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(terminal || !open),
+        .setDisabled(terminal || !openOrReady),
       new ButtonBuilder()
         .setCustomId(`lobby-cancel:${lobby.id}:${lobby.createdByDiscordId}`)
         .setLabel("Oyunu Boz")
@@ -200,7 +200,12 @@ export function renderLobbyComponents(
         .setCustomId(`lobby-cancel-missing-menu:${lobby.id}:${lobby.createdByDiscordId}`)
         .setLabel("Eksik Katilim: Oyunu Dagit")
         .setStyle(ButtonStyle.Danger)
-        .setDisabled(terminal || !canCancelForMissingPlayers(lobby) || lobby.joinedPlayersCount === 0)
+        .setDisabled(terminal || !canCancelForMissingPlayers(lobby) || lobby.joinedPlayersCount === 0),
+      new ButtonBuilder()
+        .setCustomId(`lobby-transfer-host-menu:${lobby.id}:${lobby.createdByDiscordId}`)
+        .setLabel("Hostu Devret")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(terminal || !openOrReady || lobby.joinedPlayersCount < 2)
     )
   ];
 }

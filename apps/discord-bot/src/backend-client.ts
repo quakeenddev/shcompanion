@@ -198,8 +198,8 @@ export class BackendClient {
     lobbyId: string;
     discordId: string;
     username?: string;
-  }): Promise<void> {
-    await this.request<SuccessResponse<Record<string, unknown>>>(
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
       `/lobbies/${input.lobbyId}/participants`,
       {
         method: "POST",
@@ -209,6 +209,8 @@ export class BackendClient {
         }
       }
     );
+
+    return assertLobbyView(response.lobby);
   }
 
   async leaveLobby(input: {
@@ -257,6 +259,25 @@ export class BackendClient {
         method: "POST",
         body: {
           requestedByDiscordId: input.requestedByDiscordId
+        }
+      }
+    );
+
+    return assertLobbyView(response.lobby);
+  }
+
+  async transferHost(input: {
+    lobbyId: string;
+    requestedByDiscordId: string;
+    targetDiscordId: string;
+  }): Promise<LobbyView> {
+    const response = await this.request<SuccessResponse<{ lobby: unknown }>>(
+      `/lobbies/${input.lobbyId}/transfer-host`,
+      {
+        method: "POST",
+        body: {
+          requestedByDiscordId: input.requestedByDiscordId,
+          targetDiscordId: input.targetDiscordId
         }
       }
     );

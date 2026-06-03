@@ -81,6 +81,8 @@ function formatBackendError(error: unknown): string {
       LOBBY_NOT_FOUND: "Lobi bulunamadi.",
       NOT_IN_LOBBY: "Bu lobide degilsin.",
       HOST_CANNOT_LEAVE: "Host lobiden ayrilamaz. Lobiyi kapatmak icin Oyunu Boz butonunu kullan.",
+      HOST_TRANSFER_REQUIRED: "Host lobiden ayrilmadan once hostlugu baska bir oyuncuya devretmeli.",
+      HOST_TRANSFER_TARGET_SELF: "Hostlugu kendine devredemezsin.",
       LOBBY_LOCKED: "Bu lobi artik kilitlendigi icin cikis yapilamaz.",
       HOST_ONLY: "Bu islemi sadece host yapabilir.",
       INVALID_SCHEDULE_FORMAT: "Tarih/saat formati hatali. Dogru format: gun.ay.yil-00.00 orn. 03.06.2026-21.00",
@@ -125,7 +127,7 @@ function formatBackendError(error: unknown): string {
     return "Backend yaniti beklenen formatta degil. Lutfen tekrar dene.";
   }
 
-  return "Backend ile iletisim kurulamadi. Lutfen biraz sonra tekrar dene.";
+  return "Islem kaydedilmis olabilir ama Discord mesaji guncellenirken hata olustu. Lutfen /lobim ile yeniden acmayi deneyin.";
 }
 
 function logInteractionError(
@@ -205,17 +207,51 @@ async function sendLobbyMessage(channel: unknown, lobby: LobbyView, matchCode?: 
 async function refreshLobbyMessage(message: Message, lobbyId: string, matchCode?: string): Promise<LobbyView> {
   const lobby = await backend.getLobby(lobbyId);
 
+  await editLobbyMessage(message, lobby, matchCode);
+
+  return lobby;
+}
+
+async function editLobbyMessage(message: Message, lobby: LobbyView, matchCode?: string): Promise<void> {
   await message.edit({
     embeds: [renderLobbyEmbed(lobby, matchCode)],
     components: renderLobbyComponents(lobby)
   });
+}
 
-  return lobby;
+async function tryEditLobbyMessage(
+  message: Message,
+  lobby: LobbyView,
+  context: Record<string, unknown>,
+  matchCode?: string
+): Promise<boolean> {
+  try {
+    await editLobbyMessage(message, lobby, matchCode);
+    return true;
+  } catch (error) {
+    logInteractionError("Lobby message edit failed", context, error);
+    return false;
+  }
 }
 
 function getJoinedParticipantOptions(lobby: LobbyView) {
   return lobby.participants
     .filter((participant) => participant.status === LobbyParticipantStatus.Joined)
+    .slice(0, 25)
+    .map((participant, index) => ({
+      label: (participant.username ?? `Oyuncu ${index + 1}`).slice(0, 100),
+      description: participant.discordId,
+      value: participant.discordId
+    }));
+}
+
+function getHostTransferOptions(lobby: LobbyView) {
+  return lobby.participants
+    .filter(
+      (participant) =>
+        participant.status === LobbyParticipantStatus.Joined &&
+        participant.discordId !== lobby.createdByDiscordId
+    )
     .slice(0, 25)
     .map((participant, index) => ({
       label: (participant.username ?? `Oyuncu ${index + 1}`).slice(0, 100),
@@ -379,7 +415,21 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
 
     try {
       const message = await sendLobbyMessage(interaction.channel, lobby);
-      await saveLobbyMessage(lobby, message, interaction.user.id);
+      try {
+        await saveLobbyMessage(lobby, message, interaction.user.id);
+      } catch (error) {
+        logInteractionError("/lobim message id save failed", {
+          commandName: interaction.commandName,
+          requesterDiscordId: interaction.user.id,
+          lobbyId: lobby.id,
+          messageId: message.id
+        }, error);
+
+        await interaction.editReply({
+          content: "Aktif lobin yeniden acildi ama mesaj kaydi backend'de guncellenemedi. Moderatore haber ver."
+        });
+        return;
+      }
 
       await interaction.editReply({
         content: "Aktif lobin yeniden acildi."
@@ -589,7 +639,20 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
       if (action === "mod-reopen") {
         const lobby = await backend.getLobby(lobbyId);
         const message = await sendLobbyMessage(interaction.channel, lobby);
-        await saveLobbyMessage(lobby, message, interaction.user.id, true);
+        try {
+          await saveLobbyMessage(lobby, message, interaction.user.id, true);
+        } catch (error) {
+          logInteractionError("Moderator lobby message id save failed", {
+            customId: interaction.customId,
+            lobbyId,
+            moderatorDiscordId: interaction.user.id,
+            messageId: message.id
+          }, error);
+          await interaction.editReply({
+            content: "Lobi yeniden acildi ama mesaj kaydi backend'de guncellenemedi."
+          });
+          return;
+        }
         await interaction.editReply({
           content: "Lobi yeniden acildi."
         });
@@ -652,16 +715,22 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
     await interaction.deferUpdate();
 
     try {
-      await backend.joinLobby({
+      const lobby = await backend.joinLobby({
         lobbyId,
         discordId: interaction.user.id,
         username: interaction.user.username
       });
 
-      await refreshLobbyMessage(interaction.message, lobbyId);
+      const edited = await tryEditLobbyMessage(interaction.message, lobby, {
+        customId: interaction.customId,
+        lobbyId,
+        userId: interaction.user.id
+      });
 
       await interaction.followUp({
-        content: "Lobiye katildin.",
+        content: edited
+          ? "Lobiye katildin."
+          : "Lobiye katildin ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin.",
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -684,15 +753,21 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
     await interaction.deferUpdate();
 
     try {
-      await backend.leaveLobby({
+      const lobby = await backend.leaveLobby({
         lobbyId,
         requestedByDiscordId: interaction.user.id
       });
 
-      await refreshLobbyMessage(interaction.message, lobbyId);
+      const edited = await tryEditLobbyMessage(interaction.message, lobby, {
+        customId: interaction.customId,
+        lobbyId,
+        userId: interaction.user.id
+      });
 
       await interaction.followUp({
-        content: "Lobiden ayrildin.",
+        content: edited
+          ? "Lobiden ayrildin."
+          : "Lobiden ayrildin ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin.",
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -748,15 +823,21 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
     await interaction.deferUpdate();
 
     try {
-      await backend.cancelLobby({
+      const lobby = await backend.cancelLobby({
         lobbyId,
         requestedByDiscordId: interaction.user.id
       });
 
-      await refreshLobbyMessage(interaction.message, lobbyId);
+      const edited = await tryEditLobbyMessage(interaction.message, lobby, {
+        customId: interaction.customId,
+        lobbyId,
+        userId: interaction.user.id
+      });
 
       await interaction.followUp({
-        content: "Lobi bozuldu.",
+        content: edited
+          ? "Lobi bozuldu."
+          : "Lobi bozuldu ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin.",
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
@@ -959,6 +1040,53 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
     return;
   }
 
+  if (action === "lobby-transfer-host-menu") {
+    const hostDiscordId = value;
+
+    if (interaction.user.id !== hostDiscordId) {
+      await interaction.reply({
+        content: "Bu islemi sadece host yapabilir.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    try {
+      const lobby = await backend.getLobby(lobbyId);
+      const options = getHostTransferOptions(lobby);
+
+      if (options.length === 0) {
+        await interaction.reply({
+          content: "Hostlugu devredebilecegin baska oyuncu yok.",
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: "Hostlugu devretmek istedigin oyuncuyu sec.",
+        components: [
+          new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(`lobby-transfer-host-select:${lobbyId}:${hostDiscordId}`)
+              .setPlaceholder("Yeni host sec")
+              .setMinValues(1)
+              .setMaxValues(1)
+              .addOptions(options)
+          )
+        ],
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (error) {
+      await interaction.reply({
+        content: formatBackendError(error),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    return;
+  }
+
   if (action === "lobby-create-match") {
     const hostDiscordId = value;
 
@@ -1031,7 +1159,20 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
       scheduledAtInput
     });
 
-    await updateStoredLobbyMessage(lobby);
+    try {
+      await updateStoredLobbyMessage(lobby);
+    } catch (error) {
+      logInteractionError("Schedule update message refresh failed", {
+        lobbyId,
+        userId: interaction.user.id,
+        scheduledAtInput
+      }, error);
+
+      await interaction.editReply({
+        content: "Tarih/saat guncellendi ama lobi mesaji guncellenemedi. /lobim ile yeniden acmayi deneyin."
+      });
+      return;
+    }
 
     await interaction.editReply({
       content: "Tarih/saat guncellendi."
@@ -1090,6 +1231,28 @@ async function handleSelectMenu(interaction: StringSelectMenuInteraction): Promi
       await updateStoredLobbyMessage(lobby);
       await interaction.editReply({
         content: "Eksik katilim nedeniyle oyun dagildi. Gelmeyen oyuncular raporlandi.",
+        components: []
+      });
+    } catch (error) {
+      await interaction.editReply({
+        content: formatBackendError(error),
+        components: []
+      });
+    }
+    return;
+  }
+
+  if (action === "lobby-transfer-host-select") {
+    try {
+      const lobby = await backend.transferHost({
+        lobbyId,
+        requestedByDiscordId: interaction.user.id,
+        targetDiscordId: interaction.values[0]
+      });
+
+      await updateStoredLobbyMessage(lobby);
+      await interaction.editReply({
+        content: "Hostluk devredildi.",
         components: []
       });
     } catch (error) {

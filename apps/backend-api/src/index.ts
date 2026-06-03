@@ -85,6 +85,10 @@ type RemoveParticipantBody = ModeratorBody & {
   targetDiscordId?: unknown;
 };
 
+type TransferHostBody = RequestedByBody & {
+  targetDiscordId?: unknown;
+};
+
 type UpdateScheduleBody = RequestedByBody & {
   scheduledAtInput?: unknown;
 };
@@ -310,6 +314,18 @@ async function findActiveLobbyForDiscordUser(discordId: string) {
         {
           host: {
             discordId
+          },
+          NOT: {
+            participants: {
+              some: {
+                status: {
+                  not: "JOINED"
+                },
+                user: {
+                  discordId
+                }
+              }
+            }
           }
         },
         {
@@ -915,8 +931,8 @@ app.post<{ Params: { lobbyId: string }; Body: RequestedByBody }>(
       return jsonError(
         reply,
         400,
-        "HOST_CANNOT_LEAVE",
-        "Host lobiden ayrilamaz. Lobiyi kapatmak icin Oyunu Boz butonunu kullan."
+        "HOST_TRANSFER_REQUIRED",
+        "Host lobiden ayrilmadan once hostlugu baska bir oyuncuya devretmeli."
       );
     }
 
@@ -951,6 +967,88 @@ app.post<{ Params: { lobbyId: string }; Body: RequestedByBody }>(
         resolvedAt: new Date()
       }
     });
+
+    return {
+      success: true,
+      lobby: await serializeLobby(lobby.id)
+    };
+  }
+);
+
+app.post<{ Params: { lobbyId: string }; Body: TransferHostBody }>(
+  "/api/v1/lobbies/:lobbyId/transfer-host",
+  async (request, reply) => {
+    const { requestedByDiscordId, targetDiscordId } = request.body;
+
+    if (!isNonEmptyString(requestedByDiscordId)) {
+      return jsonError(reply, 400, "requestedByDiscordId is required.");
+    }
+
+    if (!isNonEmptyString(targetDiscordId)) {
+      return jsonError(reply, 400, "targetDiscordId is required.");
+    }
+
+    const lobby = await prisma.lobby.findUnique({
+      where: {
+        id: request.params.lobbyId
+      },
+      include: {
+        host: true,
+        participants: {
+          include: {
+            user: true
+          }
+        }
+      }
+    });
+
+    if (!lobby) {
+      return jsonError(reply, 404, "LOBBY_NOT_FOUND");
+    }
+
+    if (lobby.host.discordId !== requestedByDiscordId) {
+      return jsonError(reply, 403, "HOST_ONLY");
+    }
+
+    if (lobby.status !== "OPEN" && lobby.status !== "READY") {
+      return jsonError(reply, 400, "LOBBY_NOT_OPEN");
+    }
+
+    if (targetDiscordId === requestedByDiscordId) {
+      return jsonError(reply, 400, "HOST_TRANSFER_TARGET_SELF");
+    }
+
+    const targetParticipant = lobby.participants.find(
+      (participant) =>
+        participant.status === "JOINED" &&
+        participant.user.discordId === targetDiscordId
+    );
+
+    if (!targetParticipant) {
+      return jsonError(reply, 404, "TARGET_NOT_IN_LOBBY");
+    }
+
+    await prisma.$transaction([
+      prisma.lobby.update({
+        where: {
+          id: lobby.id
+        },
+        data: {
+          hostUserId: targetParticipant.userId
+        }
+      }),
+      prisma.lobbyAuditRecord.create({
+        data: {
+          lobbyId: lobby.id,
+          action: "HOST_TRANSFERRED",
+          requestedByDiscordId,
+          targetDiscordId,
+          payload: {
+            previousHostDiscordId: requestedByDiscordId
+          }
+        }
+      })
+    ]);
 
     return {
       success: true,
@@ -995,7 +1093,7 @@ app.patch<{ Params: { lobbyId: string }; Body: UpdateScheduleBody }>(
       return jsonError(reply, 403, "HOST_ONLY");
     }
 
-    if (lobby.status !== "OPEN") {
+    if (lobby.status !== "OPEN" && lobby.status !== "READY") {
       return jsonError(reply, 400, "LOBBY_NOT_OPEN");
     }
 
@@ -1835,7 +1933,12 @@ app.post<{ Body: CreateLobbyBody }>("/api/v1/lobbies", async (request, reply) =>
       maxPlayers: playerCount,
       scheduledAt: parsedScheduledAt,
       seatsLockedAt,
-      hostUserId: hostUser.id
+      hostUserId: hostUser.id,
+      participants: {
+        create: {
+          userId: hostUser.id
+        }
+      }
     }
   });
 
