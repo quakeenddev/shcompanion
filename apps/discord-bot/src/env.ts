@@ -20,6 +20,7 @@ type RequiredEnvName = (typeof requiredEnvNames)[number];
 type DiscordBotEnv = Record<RequiredEnvName, string> & {
   botApiBaseUrl: string;
   botApiKey?: string;
+  lobbyAnnouncementChannelId?: string;
   moderatorRoleIds: string[];
 };
 
@@ -40,8 +41,14 @@ export function loadDiscordBotEnv(): DiscordBotEnv {
     DISCORD_GUILD_ID: readRequiredEnv("DISCORD_GUILD_ID"),
     botApiBaseUrl: process.env.BOT_API_BASE_URL ?? "http://localhost:3000/api/v1",
     botApiKey: process.env.BOT_API_KEY,
+    lobbyAnnouncementChannelId: readOptionalEnv("LOBBY_ANNOUNCEMENT_CHANNEL_ID"),
     moderatorRoleIds: parseModeratorRoleIds(process.env.MODERATOR_ROLE_IDS)
   };
+}
+
+function readOptionalEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value && value.length > 0 ? value : undefined;
 }
 
 function parseModeratorRoleIds(value: string | undefined): string[] {

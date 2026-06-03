@@ -1499,6 +1499,10 @@ app.post<{ Params: { lobbyId: string }; Body: MarkNoShowBody }>(
       return jsonError(reply, 404, "LOBBY_NOT_FOUND");
     }
 
+    if (targetDiscordId === requestedByDiscordId) {
+      return jsonError(reply, 400, "HOST_CANNOT_REPORT_SELF");
+    }
+
     const result = canMarkNoShow({
       isHost: lobby.host.discordId === requestedByDiscordId,
       status: lobby.status as LobbyStatus,
@@ -1599,6 +1603,10 @@ app.post<{ Params: { lobbyId: string }; Body: CancelMissingPlayersBody }>(
 
     if (!lobby) {
       return jsonError(reply, 404, "LOBBY_NOT_FOUND");
+    }
+
+    if (normalizedMissingDiscordIds.includes(requestedByDiscordId)) {
+      return jsonError(reply, 400, "HOST_CANNOT_REPORT_SELF");
     }
 
     if (lobby.status === "CANCELLED_MISSING_PLAYERS") {

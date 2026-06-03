@@ -67,6 +67,7 @@ Required bot environment values:
 DISCORD_TOKEN="replace-with-discord-bot-token"
 DISCORD_CLIENT_ID="replace-with-discord-application-client-id"
 DISCORD_GUILD_ID="replace-with-development-server-id"
+LOBBY_ANNOUNCEMENT_CHANNEL_ID="replace-with-lobby-announcement-channel-id"
 BOT_API_BASE_URL="http://localhost:3000/api/v1"
 BOT_API_KEY="dev-local-bot-key"
 BACKEND_PORT="3000"
@@ -74,6 +75,8 @@ BACKEND_BASE_URL="http://localhost:3000"
 DATABASE_URL="postgresql://USER:PASSWORD@HOST-pooler.REGION.aws.neon.tech/DBNAME?sslmode=require"
 DIRECT_URL="postgresql://USER:PASSWORD@HOST.REGION.aws.neon.tech/DBNAME?sslmode=require"
 ```
+
+`LOBBY_ANNOUNCEMENT_CHANNEL_ID` is optional but recommended. When set, all lobby cards created or recreated by the bot are posted in that channel instead of the command channel.
 
 Invite the bot:
 

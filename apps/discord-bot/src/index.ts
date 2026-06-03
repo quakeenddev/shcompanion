@@ -89,6 +89,7 @@ function formatBackendError(error: unknown): string {
       LOBBY_NOT_FOUND: "Lobi bulunamadi.",
       NOT_IN_LOBBY: "Bu lobide degilsin.",
       HOST_CANNOT_LEAVE: "Host lobiden ayrilamaz. Lobiyi kapatmak icin Oyunu Boz butonunu kullan.",
+      HOST_CANNOT_REPORT_SELF: "Host kendini eksik oyuncu olarak raporlayamaz.",
       HOST_TRANSFER_REQUIRED: "Host lobiden ayrilmadan once hostlugu baska bir oyuncuya devretmeli.",
       HOST_TRANSFER_TARGET_SELF: "Hostlugu kendine devredemezsin.",
       LOBBY_LOCKED: "Bu lobi artik kilitlendigi icin cikis yapilamaz.",
@@ -136,6 +137,20 @@ function formatBackendError(error: unknown): string {
   }
 
   return "Islem kaydedilmis olabilir ama Discord mesaji guncellenirken hata olustu. Lutfen /lobim ile yeniden acmayi deneyin.";
+}
+
+function formatDiscordMessageSendError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (/Missing Permissions|50013/i.test(message)) {
+    return "Lobi olusturuldu ama botun bu kanala mesaj atma izni yok. Lutfen bot icin Send Messages, Embed Links ve Use External Emojis izinlerini kontrol edin, sonra /lobim ile tekrar acin.";
+  }
+
+  if (/Missing Access|50001|Unknown Channel|10003/i.test(message)) {
+    return "Lobi olusturuldu ama bot bu kanala erisemiyor. Lutfen botun kanal goruntuleme ve mesaj atma izinlerini kontrol edin, sonra /lobim ile tekrar acin.";
+  }
+
+  return "Lobi olusturuldu ama Discord kanal mesaji gonderilemedi. Lutfen bot izinlerini kontrol edin ve /lobim ile tekrar acin.";
 }
 
 function logInteractionError(
@@ -261,6 +276,14 @@ async function resolveInteractionChannel(interaction: Interaction): Promise<unkn
   return fetchChannel(interaction.channelId);
 }
 
+async function resolveLobbyMessageChannel(interaction: Interaction): Promise<unknown> {
+  if (env.lobbyAnnouncementChannelId) {
+    return fetchChannel(env.lobbyAnnouncementChannelId);
+  }
+
+  return resolveInteractionChannel(interaction);
+}
+
 async function updateLobbyControlMessage(input: {
   lobby: LobbyView;
   requestedByDiscordId: string;
@@ -348,6 +371,21 @@ function formatLobbyMessageUpdateResult(successText: string, result: LobbyMessag
 function getJoinedParticipantOptions(lobby: LobbyView) {
   return lobby.participants
     .filter((participant) => participant.status === LobbyParticipantStatus.Joined)
+    .slice(0, 25)
+    .map((participant, index) => ({
+      label: (participant.username ?? `Oyuncu ${index + 1}`).slice(0, 100),
+      description: participant.discordId,
+      value: participant.discordId
+    }));
+}
+
+function getReportableParticipantOptions(lobby: LobbyView) {
+  return lobby.participants
+    .filter(
+      (participant) =>
+        participant.status === LobbyParticipantStatus.Joined &&
+        participant.discordId !== lobby.createdByDiscordId
+    )
     .slice(0, 25)
     .map((participant, index) => ({
       label: (participant.username ?? `Oyuncu ${index + 1}`).slice(0, 100),
@@ -514,7 +552,7 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
     }
 
     try {
-      const channel = await resolveInteractionChannel(interaction);
+      const channel = await resolveLobbyMessageChannel(interaction);
       const message = await sendLobbyMessage(channel, lobby);
       try {
         await saveLobbyMessage(lobby, message, interaction.user.id);
@@ -687,26 +725,20 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
     flags: MessageFlags.Ephemeral
   });
 
+  let lobby: LobbyView;
+
   try {
-    const lobby = await backend.createLobby({
+    lobby = await backend.createLobby({
       guildId: interaction.guildId,
-      channelId: interaction.channelId,
+      channelId: env.lobbyAnnouncementChannelId ?? interaction.channelId,
       createdByDiscordId: interaction.user.id,
       mode,
       playerCount,
       variant,
       scheduledAt
     });
-
-    const channel = await resolveInteractionChannel(interaction);
-    const message = await sendLobbyMessage(channel, lobby);
-    await saveLobbyMessage(lobby, message, interaction.user.id);
-
-    await interaction.editReply({
-      content: `Lobi olusturuldu. Lobi mesaji kanala gonderildi: ${message.url}`
-    });
   } catch (error) {
-    logInteractionError("Lobby creation failed", {
+    logInteractionError("Lobby creation backend request failed", {
       commandName: interaction.commandName,
       userId: interaction.user.id,
       mode,
@@ -719,11 +751,62 @@ async function handleChatCommand(interaction: ChatInputCommandInteraction): Prom
       embeds: [],
       components: []
     });
+    return;
+  }
+
+  try {
+    const channel = await resolveLobbyMessageChannel(interaction);
+    const message = await sendLobbyMessage(channel, lobby);
+
+    try {
+      await saveLobbyMessage(lobby, message, interaction.user.id);
+    } catch (error) {
+      logInteractionError("Lobby creation message id save failed", {
+        commandName: interaction.commandName,
+        userId: interaction.user.id,
+        lobbyId: lobby.id,
+        messageId: message.id,
+        channelId: message.channelId
+      }, error);
+
+      await interaction.editReply({
+        content: `Lobi olusturuldu ve mesaj kanala gonderildi, ama mesaj kaydi backend'e yazilamadi. Lobi mesaji: ${message.url}`
+      });
+      return;
+    }
+
+    await interaction.editReply({
+      content: `Lobi olusturuldu. Lobi mesaji kanala gonderildi: ${message.url}`
+    });
+  } catch (error) {
+    logInteractionError("Lobby creation Discord message send failed", {
+      commandName: interaction.commandName,
+      userId: interaction.user.id,
+      lobbyId: lobby.id,
+      channelId: interaction.channelId,
+      mode,
+      playerCount,
+      variant,
+      scheduledAt
+    }, error);
+    await interaction.editReply({
+      content: formatDiscordMessageSendError(error),
+      embeds: [],
+      components: []
+    });
   }
 }
 
 async function handleButton(interaction: ButtonInteraction): Promise<void> {
   const [action, lobbyId, value] = interaction.customId.split(":");
+
+  if (action === "menu-dismiss") {
+    await interaction.update({
+      content: "Secim kapatildi.",
+      components: []
+    });
+    return;
+  }
 
   if (action.startsWith("mod-")) {
     if (!isModerator(interaction)) {
@@ -741,7 +824,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
     try {
       if (action === "mod-reopen") {
         const lobby = await backend.getLobby(lobbyId);
-        const channel = await resolveInteractionChannel(interaction);
+        const channel = await resolveLobbyMessageChannel(interaction);
         const message = await sendLobbyMessage(channel, lobby);
         try {
           await saveLobbyMessage(lobby, message, interaction.user.id, true);
@@ -774,7 +857,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
           lobby,
           requestedByDiscordId: interaction.user.id,
           moderator: true,
-          fallbackChannel: await resolveInteractionChannel(interaction),
+          fallbackChannel: await resolveLobbyMessageChannel(interaction),
           context: {
             customId: interaction.customId,
             lobbyId,
@@ -798,7 +881,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
           lobby,
           requestedByDiscordId: interaction.user.id,
           moderator: true,
-          fallbackChannel: await resolveInteractionChannel(interaction),
+          fallbackChannel: await resolveLobbyMessageChannel(interaction),
           context: {
             customId: interaction.customId,
             lobbyId,
@@ -821,7 +904,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
           lobby,
           requestedByDiscordId: interaction.user.id,
           moderator: true,
-          fallbackChannel: await resolveInteractionChannel(interaction),
+          fallbackChannel: await resolveLobbyMessageChannel(interaction),
           context: {
             customId: interaction.customId,
             lobbyId,
@@ -860,7 +943,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         lobby,
         requestedByDiscordId: interaction.user.id,
         fallbackMessage: interaction.message,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           customId: interaction.customId,
           lobbyId,
@@ -901,7 +984,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         lobby,
         requestedByDiscordId: interaction.user.id,
         fallbackMessage: interaction.message,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           customId: interaction.customId,
           lobbyId,
@@ -975,7 +1058,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         lobby,
         requestedByDiscordId: interaction.user.id,
         fallbackMessage: interaction.message,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           customId: interaction.customId,
           lobbyId,
@@ -1010,7 +1093,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         lobby,
         requestedByDiscordId: interaction.user.id,
         fallbackMessage: interaction.message,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           customId: interaction.customId,
           lobbyId,
@@ -1047,7 +1130,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         lobby,
         requestedByDiscordId: interaction.user.id,
         fallbackMessage: interaction.message,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           customId: interaction.customId,
           lobbyId,
@@ -1096,7 +1179,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         lobby,
         requestedByDiscordId: interaction.user.id,
         fallbackMessage: interaction.message,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           customId: interaction.customId,
           lobbyId,
@@ -1131,7 +1214,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
 
     try {
       const lobby = await backend.getLobby(lobbyId);
-      const options = getJoinedParticipantOptions(lobby);
+      const options = getReportableParticipantOptions(lobby);
 
       if (options.length === 0) {
         await interaction.reply({
@@ -1151,6 +1234,12 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
               .setMinValues(1)
               .setMaxValues(1)
               .addOptions(options)
+          ),
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`menu-dismiss:${lobbyId}`)
+              .setLabel("Kapat")
+              .setStyle(ButtonStyle.Secondary)
           )
         ],
         flags: MessageFlags.Ephemeral
@@ -1178,11 +1267,11 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
 
     try {
       const lobby = await backend.getLobby(lobbyId);
-      const options = getJoinedParticipantOptions(lobby);
+      const options = getReportableParticipantOptions(lobby);
 
       if (options.length === 0) {
         await interaction.reply({
-          content: "Lutfen gelmeyen en az bir oyuncu sec.",
+          content: "Host disinda raporlanabilecek aktif oyuncu yok.",
           flags: MessageFlags.Ephemeral
         });
         return;
@@ -1198,6 +1287,12 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
               .setMinValues(1)
               .setMaxValues(options.length)
               .addOptions(options)
+          ),
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`menu-dismiss:${lobbyId}`)
+              .setLabel("Kapat")
+              .setStyle(ButtonStyle.Secondary)
           )
         ],
         flags: MessageFlags.Ephemeral
@@ -1280,7 +1375,7 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
         requestedByDiscordId: interaction.user.id,
         matchCode,
         fallbackMessage: interaction.message,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           customId: interaction.customId,
           lobbyId,
@@ -1349,7 +1444,7 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
     const updateResult = await updateLobbyControlMessage({
       lobby,
       requestedByDiscordId: interaction.user.id,
-      fallbackChannel: await resolveInteractionChannel(interaction),
+      fallbackChannel: await resolveLobbyMessageChannel(interaction),
       context: {
         source: "schedule-modal",
         lobbyId,
@@ -1392,7 +1487,7 @@ async function handleSelectMenu(interaction: StringSelectMenuInteraction): Promi
       const updateResult = await updateLobbyControlMessage({
         lobby,
         requestedByDiscordId: interaction.user.id,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           source: "no-show-select",
           lobbyId,
@@ -1425,7 +1520,7 @@ async function handleSelectMenu(interaction: StringSelectMenuInteraction): Promi
       const updateResult = await updateLobbyControlMessage({
         lobby,
         requestedByDiscordId: interaction.user.id,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           source: "cancel-missing-select",
           lobbyId,
@@ -1460,7 +1555,7 @@ async function handleSelectMenu(interaction: StringSelectMenuInteraction): Promi
       const updateResult = await updateLobbyControlMessage({
         lobby,
         requestedByDiscordId: interaction.user.id,
-        fallbackChannel: await resolveInteractionChannel(interaction),
+        fallbackChannel: await resolveLobbyMessageChannel(interaction),
         context: {
           source: "transfer-host-select",
           lobbyId,
