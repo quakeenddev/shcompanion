@@ -39,7 +39,7 @@ export const developmentCommands = [
       option
         .setName("variant")
         .setDescription("7-player variant.")
-        .setRequired(false)
+        .setRequired(true)
         .addChoices(
           { name: "Standard", value: "STANDARD" },
           { name: "Standard Meta", value: "STANDARD_META" },
